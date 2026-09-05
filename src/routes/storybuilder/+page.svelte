@@ -53,6 +53,14 @@
 	let recognition: any = null;
 	let silenceTimer: ReturnType<typeof setTimeout> | null = null;
 	let finalTranscriptBuf = '';
+	// Final chunks for the CURRENT recognition session, keyed by result index.
+	// Assigning by index (rather than appending) makes re-delivered results idempotent.
+	let finalChunks: string[] = [];
+	// Text carried over from earlier recognition sessions in the SAME turn. Mobile
+	// Chrome ends recognition after every pause regardless of continuous=true, and each
+	// restart begins a fresh results array at index 0 — which would otherwise overwrite
+	// what the user already said.
+	let committedText = '';
 	let isActive = false;
 	let shouldRestart = false;
 	// ── End-of-turn detection ──
@@ -149,6 +157,8 @@
 		clearSilenceTimer();
 		const transcript = finalTranscriptBuf.trim();
 		finalTranscriptBuf = '';
+		finalChunks = [];
+		committedText = '';
 		interimTranscript = '';
 		// Send whatever was said. The old version pushed anything under 3 words back
 		// into the buffer, which meant a one-word answer could never be submitted.
@@ -213,19 +223,30 @@
 		rec.onstart = () => { isListening = true; };
 
 		rec.onresult = (event: any) => {
+			// Rebuild from the FULL result list every time, storing each final chunk at
+			// its own index rather than appending. Browsers — mobile Chrome especially —
+			// re-deliver results that were already final, with event.resultIndex reset to
+			// 0. Appending those produced the utterance duplicated as growing prefixes
+			// ("I" / "I don't" / "I don't have anything"), which was then sent to Claude
+			// as the user's turn: garbled input, and a token bill several times over.
+			// Assigning by index makes re-delivery idempotent.
 			let interim = '';
-			let final = '';
-			for (let i = event.resultIndex; i < event.results.length; i++) {
+			let sawFinal = false;
+			for (let i = 0; i < event.results.length; i++) {
+				const text = event.results[i][0].transcript;
 				if (event.results[i].isFinal) {
-					final += event.results[i][0].transcript;
+					finalChunks[i] = text;
+					sawFinal = true;
 				} else {
-					interim += event.results[i][0].transcript;
+					interim += text;
 				}
 			}
-			if (final) { finalTranscriptBuf += final; startSilenceTimer(); }
-			if (interim) { clearSilenceTimer(); }
-			const display = finalTranscriptBuf + interim;
-			interimTranscript = display;
+			finalTranscriptBuf = (committedText + ' ' + finalChunks.filter(Boolean).join(' '))
+				.replace(/\s+/g, ' ')
+				.trim();
+			if (sawFinal) startSilenceTimer();
+			if (interim) clearSilenceTimer();
+			interimTranscript = (finalTranscriptBuf + ' ' + interim).replace(/\s+/g, ' ').trim();
 		};
 
 		rec.onerror = (event: any) => {
@@ -240,18 +261,39 @@
 
 		rec.onend = () => {
 			isListening = false;
-			clearSilenceTimer();
+
+			// Carry this session's text forward. A restart begins a fresh results array
+			// at index 0, so without committing first, the next session would overwrite
+			// what the user already said.
+			if (finalChunks.some(Boolean)) {
+				committedText = (committedText + ' ' + finalChunks.filter(Boolean).join(' '))
+					.replace(/\s+/g, ' ')
+					.trim();
+				finalChunks = [];
+				finalTranscriptBuf = committedText;
+			}
+
+			// Deliberate end of turn (our silence logic called endTurn).
 			if (shouldRestart) {
 				shouldRestart = false;
+				clearSilenceTimer();
 				finalizeTurn();
 				if (isActive && phase === 'coaching') {
 					setTimeout(() => { try { recognition?.start(); } catch {} }, 200);
 				}
 				return;
 			}
-			if (finalTranscriptBuf.trim()) { finalizeTurn(); }
+
+			// Recognition ended on its own — mobile Chrome does this after any short
+			// pause even with continuous=true. This is NOT the end of the user's turn.
+			// Previously we finalized here, which sent half-finished answers the moment
+			// someone paused to think; users reported having to talk fast to avoid being
+			// cut off. Keep the silence timers running and let them decide instead.
 			if (isActive && phase === 'coaching') {
 				setTimeout(() => { try { recognition?.start(); } catch {} }, 200);
+			} else if (finalTranscriptBuf.trim()) {
+				// Genuinely stopping (not restarting) — don't lose what they said.
+				finalizeTurn();
 			}
 		};
 
@@ -261,6 +303,8 @@
 	function startListening() {
 		isActive = true;
 		finalTranscriptBuf = '';
+		finalChunks = [];
+		committedText = '';
 		interimTranscript = '';
 		if (recognition) { try { recognition.abort(); } catch {} }
 		recognition = createRecognition();
@@ -1062,12 +1106,51 @@
 		await goto(href, { invalidateAll: true });
 	}
 
+	// ── Keep the screen awake during a session ──
+	// The user is listening, not touching the screen, for 30-60s at a time while the
+	// coach speaks — and Android's default screen timeout is often 30s. So the phone
+	// dims mid-session on default settings, and a locked screen can background the page
+	// and orphan the session (there's no resume, so the credit is spent).
+	// This does NOT cover genuinely uncontrollable interruptions — an incoming call, a
+	// flat battery — which stay a manual-refund case.
+	let wakeLock: any = null;
+
+	async function acquireWakeLock() {
+		if (!browser || !('wakeLock' in navigator)) return;
+		if (wakeLock) return;
+		try {
+			wakeLock = await (navigator as any).wakeLock.request('screen');
+			// Fires if the system drops it (tab hidden, battery saver).
+			wakeLock.addEventListener?.('release', () => { wakeLock = null; });
+		} catch {
+			// Denied or unsupported — non-fatal, the session still works.
+		}
+	}
+
+	async function releaseWakeLock() {
+		try { await wakeLock?.release(); } catch {}
+		wakeLock = null;
+	}
+
+	// The lock is auto-released whenever the page is hidden, so it must be re-acquired
+	// on return — otherwise it silently protects only until the first tab switch.
+	function handleVisibilityChange() {
+		if (document.visibilityState === 'visible' && phase === 'coaching') acquireWakeLock();
+	}
+
+	// Hold the lock only while a session is actually running.
+	$: if (browser) {
+		if (phase === 'coaching') acquireWakeLock();
+		else if (wakeLock) releaseWakeLock();
+	}
+
 	onMount(() => {
 		const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 		browserSupported = !!SR;
 		window.addEventListener('mousemove', handleMouseMove);
 		window.addEventListener('mouseup', handleMouseUp);
 		window.addEventListener('beforeunload', handleBeforeUnload);
+		document.addEventListener('visibilitychange', handleVisibilityChange);
 	});
 
 	onDestroy(() => {
@@ -1075,10 +1158,12 @@
 		stopListening();
 		ttsStop();
 		ttsStop();
+		releaseWakeLock();
 		if (timerInterval) clearInterval(timerInterval);
 		window.removeEventListener('mousemove', handleMouseMove);
 		window.removeEventListener('mouseup', handleMouseUp);
 		window.removeEventListener('beforeunload', handleBeforeUnload);
+		document.removeEventListener('visibilitychange', handleVisibilityChange);
 	});
 </script>
 
