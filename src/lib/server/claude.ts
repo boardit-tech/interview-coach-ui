@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { ANTHROPIC_API_KEY } from '$env/static/private';
 import { lookupCompanyRubric } from './companyRubrics';
+import { recordLlmUsage, type MessageUsage } from './usage';
 
 const anthropic = new Anthropic({
   apiKey: ANTHROPIC_API_KEY,
@@ -56,88 +57,7 @@ function pickSuggestions(sessionId: string): string[] {
   return picks;
 }
 
-// ── Token usage tracking (per-call to Supabase) ──
-const SONNET_INPUT_PRICE = 3.0;   // $ per 1M input tokens
-const SONNET_OUTPUT_PRICE = 15.0; // $ per 1M output tokens
-
-interface MessageUsage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens?: number;
-  cache_creation_input_tokens?: number;
-}
-
-// Fire-and-forget: increment token counts directly in Supabase per API call
-export async function trackUsageToDb(sessionId: string, usage: MessageUsage, supabase: any) {
-  const inputCost = (usage.input_tokens / 1_000_000) * SONNET_INPUT_PRICE;
-  const outputCost = (usage.output_tokens / 1_000_000) * SONNET_OUTPUT_PRICE;
-  const callCost = parseFloat((inputCost + outputCost).toFixed(6));
-
-  try {
-    const { error } = await supabase.rpc('increment_session_usage', {
-      p_session_id: sessionId,
-      p_input_tokens: usage.input_tokens,
-      p_output_tokens: usage.output_tokens,
-      p_cost: callCost,
-    });
-    if (error) console.error('[trackUsage] RPC FAILED:', error.message);
-  } catch (err: any) {
-    console.error('[trackUsage] RPC exception:', err.message);
-  }
-}
-
-// ── Conversation summarization ──
-const SUMMARIZE_AFTER_TURNS = 12;
-
 export type ConversationMessage = { role: 'user' | 'assistant'; content: string };
-
-async function summarizeHistory(conversationHistory: ConversationMessage[]): Promise<ConversationMessage[]> {
-  const keepRecent = 8;  // Keep last 4 exchanges verbatim
-  if (conversationHistory.length <= keepRecent + 2) return conversationHistory;
-
-  const toSummarize = conversationHistory.slice(0, -keepRecent);
-  const recentMessages = conversationHistory.slice(-keepRecent);
-
-  const summaryPrompt = `You are summarizing the early portion of a coaching conversation so the coach can continue without losing context. This summary REPLACES the original messages, so it must preserve ALL specifics.
-
-PRESERVE EVERYTHING the user said — this is critical:
-- The interview question being practiced
-- Company name, team name, product name, project name
-- All names of people mentioned (manager, teammates, stakeholders)
-- All numbers: timelines, team sizes, metrics, percentages, dollar amounts
-- All technical details: technologies, systems, processes, tools
-- Specific actions the user took and decisions they made
-- Any conflicts, challenges, or obstacles described
-- Results and outcomes mentioned, even if rough estimates
-- The user's role and scope vs. the team's
-
-Do NOT generalize. "User described working on a pricing project" loses information. Instead: "User was a technical program manager at Flexport working on replacing the heuristic Internal Cost Curve pricing model with automated expected procurement costs, team of 3 engineers plus a staff engineer, started Nov 2024, needed to show results by end of Q1."
-
-Keep it under 600 words.`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 800,
-      messages: [
-        {
-          role: 'user',
-          content: `${summaryPrompt}\n\nConversation to summarize:\n${toSummarize.map(m => `${m.role}: ${m.content}`).join('\n\n')}`
-        }
-      ],
-    });
-
-    const summary = (response.content[0] as { type: 'text'; text: string }).text;
-    return [
-      { role: 'user', content: `[Detailed summary of earlier conversation — treat all facts here as things the user already told you. Do NOT re-ask about any of these details:\n${summary}]` },
-      { role: 'assistant', content: 'Got it, I have the full context from our earlier discussion. Let me continue coaching from here.' },
-      ...recentMessages,
-    ];
-  } catch (e: any) {
-    console.warn('Failed to summarize history, using full history:', e.message);
-    return conversationHistory;
-  }
-}
 
 // Shared rubric set — the coaching framework used when the user has NOT named a
 // target company. Lives outside COACH_SYSTEM_PROMPT so the end-of-session assessment
@@ -397,12 +317,13 @@ These are THEMES, not fixed questions — if the user likes a theme but wants a 
 Always let them pick one, or invite them to describe any real experience instead.]`,
   });
 
-  // Summarize long conversations
-  const userMsgCount = conversationHistory.filter(m => m.role === 'user').length;
-  let messagesToSend = conversationHistory;
-  if (userMsgCount > SUMMARIZE_AFTER_TURNS) {
-    messagesToSend = await summarizeHistory(conversationHistory);
-  }
+  // The raw transcript is sent as-is. It was previously summarized past 12 user
+  // turns, which cost ~$0.02/turn to save ~$0.001, regenerated the summary on
+  // EVERY subsequent turn rather than once, and — because a regenerated summary
+  // changes the cached prefix — defeated the caching below. It was also lossy and
+  // non-deterministic, which made the coach re-ask things the user had already
+  // answered, the one thing COACH_SYSTEM_PROMPT explicitly forbids.
+  const messagesToSend = conversationHistory;
 
   // Add cache breakpoint on conversation history prefix (all messages except the latest user message)
   // This way Claude skips re-reading the cached portion on each turn — faster + 90% cheaper on input
@@ -438,7 +359,7 @@ Always let them pick one, or invite them to describe any real experience instead
   }
 
   if (sessionId && finalMessage.usage) {
-    if (supabase) await trackUsageToDb(sessionId, finalMessage.usage as MessageUsage, supabase);
+    if (supabase) await recordLlmUsage(sessionId, finalMessage.usage as MessageUsage, supabase);
     else console.error('[DEBUG] supabase is falsy!');
   } else {
     console.error('[DEBUG] skipped trackUsage — sessionId:', sessionId, 'usage:', finalMessage.usage);
@@ -572,7 +493,7 @@ Respond with ONLY a JSON object:
     });
 
     if (sessionId && response.usage && supabase) {
-      await trackUsageToDb(sessionId, response.usage as MessageUsage, supabase);
+      await recordLlmUsage(sessionId, response.usage as MessageUsage, supabase);
     }
 
     const text = (response.content[0] as { type: 'text'; text: string }).text;
@@ -609,132 +530,6 @@ Respond with ONLY a JSON object:
   }
 }
 
-// ── Story strength signals ──
-export async function evaluateStrengthSignals(
-  conversationHistory: ConversationMessage[],
-  question: string | null,
-  fullStory: string | null,
-  sessionId: string,
-  supabase?: any
-): Promise<{ strong: Array<{ signal: string; explanation: string }>; improve: Array<{ signal: string; explanation: string }> } | null> {
-  const prompt = `You are evaluating a STAR interview story against behavioral interview rubrics. Your job is to identify which strength signals the story demonstrates well, and which relevant ones are weak or missing.
-
-CRITICAL: Only evaluate rubrics that are HIGHLY RELEVANT to the interview question being practiced. For example:
-- "Tell me about a time you disagreed with your manager" → focus on Disagree and Commit, Earn Trust, Influencing, Collaboration
-- "Tell me about a failure" → focus on Ownership, Learn and Be Curious, Adaptability, Are Right A Lot
-- "Tell me about a complex project you led" → focus on Deliver Results, Plan and Prioritize, Stakeholder Management, Dive Deep
-- "Tell me about a conflict with a teammate" → focus on Collaboration, Earn Trust, Disagree and Commit, Influencing
-
-Do NOT evaluate rubrics that are irrelevant to the question theme. Select 3-5 most relevant rubrics total.
-
-Available rubrics:
-ADAPTABILITY, DEALING WITH AMBIGUITY, ARE RIGHT A LOT, BIAS FOR ACTION, COLLABORATION, CONSCIENTIOUSNESS, CUSTOMER FOCUS, CUSTOMER ORIENTATION, DATA-DRIVEN DECISION MAKING, DELIVER RESULTS, DISAGREE AND COMMIT, DIVE DEEP, EARN TRUST, FRUGALITY, INFLUENCING, INNOVATION, INSIST ON HIGH STANDARDS, JUDGEMENT AND DECISION MAKING, VISION AND STRATEGY, LEARN AND BE CURIOUS, LEARNING ORIENTATION, OWNERSHIP, PLAN AND PRIORITIZE, STAKEHOLDER MANAGEMENT, THINK BIG, TECHNICAL PROBLEM SOLVING, PROGRAM MANAGEMENT, PEOPLE DEVELOPMENT & COACHING, TEAM BUILDING & PERFORMANCE, DELEGATION & EMPOWERMENT
-
-For each signal you evaluate:
-- "strong": The story clearly demonstrates this with specific evidence (actions, decisions, outcomes)
-- "improve": The story touches on this but lacks specifics, OR this signal is highly relevant to the question but missing from the story
-
-Your explanation must reference THIS user's specific story details — not generic advice. For "improve" items, briefly say what's missing and what they could add.
-
-Interview question: ${question || '(not specified)'}
-
-Full story:
-${fullStory || '(not available)'}
-
-Conversation transcript (for additional context on what the user shared):
-${conversationHistory.map(m => `${m.role === 'assistant' ? 'Coach' : 'User'}: ${m.content}`).join('\n\n')}
-
-Respond with ONLY a JSON object:
-{
-  "strong": [
-    { "signal": "Signal Name", "explanation": "One sentence why this story demonstrates it well, referencing specific details." }
-  ],
-  "improve": [
-    { "signal": "Signal Name", "explanation": "One sentence on what's weak or missing, with a concrete suggestion." }
-  ]
-}`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 800,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    if (sessionId && response.usage) {
-      if (supabase) await trackUsageToDb(sessionId, response.usage as MessageUsage, supabase);
-    }
-
-    const text = (response.content[0] as { type: 'text'; text: string }).text;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    return {
-      strong: parsed.strong || [],
-      improve: parsed.improve || [],
-    };
-  } catch (e: any) {
-    console.error('Failed to evaluate strength signals:', e.message);
-    return null;
-  }
-}
-
-// ── Talking points ──
-export async function generateTalkingPoints(
-  starSections: { situation?: string | null; task?: string | null; action?: string | null; result?: string | null } | null,
-  sessionId: string,
-  fullStory?: string | null,
-  supabase?: any
-) {
-  let prompt: string;
-
-  const source = fullStory
-    ? `Full story:\n${fullStory}`
-    : `Situation: ${starSections?.situation || '(not provided)'}\nTask: ${starSections?.task || '(not provided)'}\nAction: ${starSections?.action || '(not provided)'}\nResult: ${starSections?.result || '(not provided)'}`;
-
-  prompt = `You are breaking down a STAR interview story into granular talking points — the memory anchors a candidate glances at before walking into the interview room. They should NOT memorize the full text. Instead, each bullet is a concrete cue that triggers a full sentence when spoken naturally.
-
-Rules:
-- Extract 4-6 talking points per STAR section
-- Each point: one specific fact, name, number, decision, contrast, or outcome (max 12 words)
-- Order them in the sequence the candidate should mention them
-- Include: company/product names, team sizes, timelines, metrics, stakeholder names or roles, technologies, the "before vs after" contrast, decisions and their reasoning
-- For Action: break down each distinct step or decision as its own bullet — this is where candidates ramble most, so granular anchors matter
-- For Result: lead with the metric, then the business meaning
-- Do NOT use vague language like "handled the situation" or "worked with team" — be specific
-
-${source}
-
-Respond with ONLY a JSON object:
-{
-  "situation": ["point 1", "point 2", "point 3", "point 4"],
-  "task": ["point 1", "point 2", "point 3", "point 4"],
-  "action": ["point 1", "point 2", "point 3", "point 4", "point 5"],
-  "result": ["point 1", "point 2", "point 3", "point 4"]
-}`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 700,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    if (sessionId && response.usage) {
-      if (supabase) await trackUsageToDb(sessionId, response.usage as MessageUsage, supabase);
-    }
-
-    const text = (response.content[0] as { type: 'text'; text: string }).text;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    return jsonMatch ? JSON.parse(jsonMatch[0]) : null;
-  } catch (e: any) {
-    console.error('Failed to generate talking points:', e.message);
-    return null;
-  }
-}
-
-// ── Real-time STAR section extractor (runs in parallel with coach) ──
 export async function extractStarSections(
   conversationHistory: ConversationMessage[],
   sessionId: string,
@@ -777,13 +572,30 @@ Respond with ONLY a JSON object:
 }`;
 
   try {
-    const transcript = conversationHistory
-      .map(m => `${m.role === 'assistant' ? 'Coach' : 'User'}: ${m.content}`)
-      .join('\n\n');
+    const asLine = (m: ConversationMessage) =>
+      `${m.role === 'assistant' ? 'Coach' : 'User'}: ${m.content}`;
+
+    // Split the transcript so the settled portion can be cached. This call runs on
+    // EVERY turn and re-reads the whole conversation each time, so uncached it cost
+    // roughly the sum 1+2+...+n turns of reading — the single largest cost in a
+    // session, and quadratic in story length once transcripts span sessions.
+    // Holding back the most recent exchanges keeps the cached prefix identical to
+    // what was sent last turn, which is what makes it a cache hit rather than a
+    // fresh write.
+    const KEEP_UNCACHED = 4; // last 2 exchanges
+    const settled = conversationHistory.slice(0, -KEEP_UNCACHED);
+    const recent = conversationHistory.slice(-KEEP_UNCACHED);
 
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 1200,
+      // Deterministic: this call re-runs every turn on nearly-identical input, and at
+      // the default temperature it rewords sections that haven't materially changed.
+      // Every reword counts as a change (interview.ts compares strings), so it pushes
+      // a spurious update and churns text the user already read. At 0, a section only
+      // changes when the transcript actually gave it something new. Extraction wants
+      // consistency, not variety — the coach call keeps the default, where variety helps.
+      temperature: 0,
       // Cache the (static) extractor prompt — it's re-sent on every turn's extraction,
       // so caching trims ~90% off re-reading it across a session.
       system: [
@@ -793,12 +605,24 @@ Respond with ONLY a JSON object:
         { type: 'text', text: `\n\n${currentDateLine()}` },
       ],
       messages: [
-        { role: 'user', content: `Conversation so far:\n\n${transcript}` }
+        {
+          role: 'user',
+          content: settled.length
+            ? [
+                {
+                  type: 'text' as const,
+                  text: `Conversation so far:\n\n${settled.map(asLine).join('\n\n')}`,
+                  cache_control: { type: 'ephemeral' as const },
+                },
+                { type: 'text' as const, text: `\n\n${recent.map(asLine).join('\n\n')}` },
+              ]
+            : `Conversation so far:\n\n${recent.map(asLine).join('\n\n')}`,
+        },
       ],
     });
 
     if (sessionId && response.usage) {
-      if (supabase) await trackUsageToDb(sessionId, response.usage as MessageUsage, supabase);
+      if (supabase) await recordLlmUsage(sessionId, response.usage as MessageUsage, supabase);
     }
 
     const text = (response.content[0] as { type: 'text'; text: string }).text;

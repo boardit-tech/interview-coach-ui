@@ -8,6 +8,11 @@
 	// ── State ──
 	let phase: 'lobby' | 'coaching' | 'loading-report' | 'report' = 'lobby';
 	let sessionId: string | null = null;
+	// STT diagnostics. A session that ends with no turns looks identical whether the
+	// mic was broken or the user simply left — these are what tell them apart. Both
+	// are captured here and sent with /api/end; nothing branches on them yet.
+	let sttError: string | null = null;
+	let sawSpeech = false;
 	let messages: Array<{ role: string; content: string; streaming?: boolean }> = [];
 	let loading = false;
 	let report: any = null;
@@ -230,13 +235,26 @@
 
 		rec.onerror = (event: any) => {
 			if (event.error === 'no-speech' || event.error === 'aborted') {
+				// Benign — mic works and nothing was said, or this is our own restart.
 				if (isActive && phase === 'coaching') {
 					setTimeout(() => { try { recognition?.start(); } catch {} }, 100);
 				}
 				return;
 			}
+			// Everything else was previously discarded here: 'not-allowed' (permission
+			// denied), 'audio-capture' (no mic), 'network' (STT unreachable). Keep the
+			// most recent one — a session usually fails the same way repeatedly, and the
+			// last code is the one that ended it.
+			sttError = event.error || 'unknown';
+			console.warn('[stt-error]', sttError);
 			isListening = false;
 		};
+
+		// Speech reached the browser but produced no transcript — a silent failure that
+		// raises no error at all, so the codes above would miss it entirely. Paired with
+		// a zero-turn session this is strong evidence of STT dropping audio rather than
+		// the user being absent.
+		rec.onspeechstart = () => { sawSpeech = true; };
 
 		rec.onend = () => {
 			isListening = false;
@@ -291,7 +309,7 @@
 		const promise = fetch('/storybuilder/api/tts', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ text }),
+			body: JSON.stringify({ text, sessionId }),
 			signal: controller.signal,
 		}).then(res => { clearTimeout(timeout); return res.ok ? res.blob() : null; })
 		  .catch(() => { clearTimeout(timeout); return null; });
@@ -784,7 +802,9 @@
 				question: assessment.question || null,
 				full_story: assessment.fullStory || null,
 				talking_points: assessment.sections || null,
-				strength_signals: { strengths: assessment.strengths, growth: assessment.growth } || null,
+				strength_signals: (assessment.strengths?.length || assessment.growth?.length)
+					? { strengths: assessment.strengths, growth: assessment.growth }
+					: null,
 				flags: extractedFlags || null,
 				tier: assessment.tier,
 			}),
@@ -878,7 +898,7 @@
 		fetch('/storybuilder/api/end', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ sessionId, generateReport: false, starSectionsFilled }),
+			body: JSON.stringify({ sessionId, generateReport: false, starSectionsFilled, sttError, sawSpeech }),
 		}).catch(() => {});
 
 		trySaveStory();

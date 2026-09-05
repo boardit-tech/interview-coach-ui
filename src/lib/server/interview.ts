@@ -1,9 +1,15 @@
 import {
   streamCoachResponse,
   extractStarSections,
-  trackUsageToDb,
   type ConversationMessage
 } from './claude';
+
+const STAR_KEYS = ['situation', 'task', 'action', 'result'] as const;
+
+// Spoken verbatim when the fourth section turns green. Mirrors the Phase 6 wording in
+// COACH_SYSTEM_PROMPT so the moment reads the same as before — minus the recap.
+const HANDBACK_LINE =
+  "We've got good material for all four parts of your story now. Is there anything you'd like to add or revisit? Or if you're happy with where we are, we can wrap up and I'll polish it into a final version.";
 
 const SESSION_LIMIT_MS = 20 * 60 * 1000; // 20 minutes
 
@@ -174,17 +180,39 @@ export async function handleUserMessageStream(
 
   const elapsedMinutes = elapsed / 60000;
 
-  const coachResponse = await streamCoachResponse(
-    session.conversationHistory,
-    elapsedMinutes,
-    sessionId,
-    (chunk) => {
-      writer.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
-    },
-    session.starSections,
-    supabase,
-    session.targetCompany
+  // Hand-back is driven from code, not from the prompt. COACH_SYSTEM_PROMPT already
+  // says "Do NOT read back or recap the full STAR story", and the coach is handed the
+  // section states directly — it has both the rule and the information, and recaps
+  // anyway. Reading the whole story aloud costs ~90-120s of a 20-minute session and
+  // ~$0.035 of TTS to narrate something already visible in the sidebar. So when all
+  // four sections are green we skip the model entirely for one turn and speak a fixed
+  // line: no API call, no discretion to override.
+  //
+  // The "already handed back" flag is DERIVED from the transcript rather than held in
+  // memory. An in-memory flag wouldn't survive a cold Edge instance, and two instances
+  // would each fire it once — the same failure shape as the session-cache data loss.
+  const allGreen = STAR_KEYS.every(k => !!session.starSections[k]);
+  const alreadyHandedBack = session.conversationHistory.some(
+    m => m.role === 'assistant' && m.content === HANDBACK_LINE
   );
+
+  let coachResponse: string;
+  if (allGreen && !alreadyHandedBack) {
+    coachResponse = HANDBACK_LINE;
+    writer.write(`data: ${JSON.stringify({ type: 'chunk', text: coachResponse })}\n\n`);
+  } else {
+    coachResponse = await streamCoachResponse(
+      session.conversationHistory,
+      elapsedMinutes,
+      sessionId,
+      (chunk) => {
+        writer.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+      },
+      session.starSections,
+      supabase,
+      session.targetCompany
+    );
+  }
 
   session.conversationHistory.push({
     role: 'assistant',
@@ -224,6 +252,24 @@ export async function handleUserMessageStream(
         }
         for (const key of ['situation', 'task', 'action', 'result'] as const) {
           if (sections[key] && sections[key] !== session.starSections[key]) {
+            // The extractor regenerates each section from scratch rather than editing
+            // it, so a fact captured earlier can silently vanish from a later version
+            // even though it's still in the transcript. That failure is invisible —
+            // the section still reads fine. Log dropped numbers (the highest-value and
+            // most detectable facts) so we can find out whether this actually happens
+            // before deciding whether it needs guarding. Diagnostic only: nothing
+            // branches on it.
+            const prev = session.starSections[key];
+            if (prev) {
+              const numbersIn = (t: string) => new Set(t.match(/\d[\d,.]*%?/g) ?? []);
+              const after = numbersIn(sections[key]!);
+              const dropped = [...numbersIn(prev)].filter(n => !after.has(n));
+              if (dropped.length) {
+                console.warn(
+                  `[section-drop] session=${sessionId} section=${key} dropped=${dropped.join('|')}`
+                );
+              }
+            }
             session.starSections[key] = sections[key];
             updates.push({ section: key, content: sections[key]! });
           }
