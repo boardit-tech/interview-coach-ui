@@ -75,6 +75,9 @@ export const POST: RequestHandler = async ({ locals, request }) => {
       status: 'completed',
       duration_ms: result.durationMs,
       star_sections_filled: starSectionsFilled ?? null,
+      // 1.6b — persist the browser's STT diagnosis for every session, not just the
+      // zero-turn ones that alert. Lets us size the mobile-STT problem from the table.
+      stt_error: sttError ?? null,
     };
     const { error: logError } = await locals.supabase.from('session_logs')
       .update(updateData)
