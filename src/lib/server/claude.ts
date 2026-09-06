@@ -285,9 +285,12 @@ export async function streamCoachResponse(
   ];
   // Uncached — changes daily, and the recency guidance depends on it.
   systemMessages.push({ type: 'text', text: `\n\n${currentDateLine()}` });
-  if (pacingContext) {
-    systemMessages.push({ type: 'text', text: pacingContext });
-  }
+  // pacingContext is NOT added here — see below. It changes every turn (elapsed
+  // minutes), and anything that sits between the cached system prompt and the
+  // message breakpoint is part of the prefix that has to match for the history
+  // to be a cache hit. With it here, the history was rewritten in full on every
+  // turn (cache_read pinned at the system prompt, cache_creation climbing) and
+  // had in fact never been cached.
   // Company-specific rubrics, when the user named a target company. Overrides the
   // generic rubric set for probing ONLY — the coach still never names a rubric to
   // the user (naming it invites performing to it).
@@ -327,10 +330,19 @@ Always let them pick one, or invite them to describe any real experience instead
 
   // Add cache breakpoint on conversation history prefix (all messages except the latest user message)
   // This way Claude skips re-reading the cached portion on each turn — faster + 90% cheaper on input
+  const lastIdx = messagesToSend.length - 1;
   const messagesWithCache = messagesToSend.map((m, i) => {
     if (i === messagesToSend.length - 2 && messagesToSend.length >= 3) {
       // Cache up to the second-to-last message (the assistant reply before the new user message)
       return { ...m, content: [{ type: 'text' as const, text: m.content as string, cache_control: { type: 'ephemeral' as const } }] };
+    }
+    if (i === lastIdx && pacingContext && m.role === 'user') {
+      // Pacing rides on the OUTGOING copy of the newest user message. This is past
+      // the last cache breakpoint, so it is plain uncached input (1x, not the 1.25x
+      // write it cost inside the prefix) and can change freely without invalidating
+      // anything. The stored message in conversationHistory is untouched — this is a
+      // new object, so the transcript never accumulates stale timing notes.
+      return { ...m, content: `${m.content}\n\n${pacingContext}` };
     }
     return m;
   });
