@@ -57,11 +57,14 @@ export async function recordLlmUsage(sessionId: string, usage: MessageUsage, sup
   try {
     const { error } = await supabase.rpc('increment_session_usage', {
       p_session_id: sessionId,
-      // Cached tokens are billed but not yet stored separately, so the token
-      // counts below still under-report volume even though p_cost is now right.
       p_input_tokens: usage.input_tokens,
       p_output_tokens: usage.output_tokens,
       p_cost: callCost,
+      // Breakdown only — p_cost above already prices these. Needs migrations/004:
+      // before it, Postgres rejects the unknown parameters, the error is logged and
+      // swallowed, and LLM cost tracking silently stops. Apply 004 before deploying.
+      p_cache_creation: cacheWriteTokens,
+      p_cache_read: cacheReadTokens,
     });
     if (error) console.error('[usage] increment_session_usage failed:', error.message);
   } catch (err: any) {
