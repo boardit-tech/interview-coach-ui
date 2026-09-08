@@ -278,15 +278,56 @@ export async function getSessionTargetCompany(sessionId: string, supabase: any):
   return session.targetCompany ?? null;
 }
 
-export async function startSession(sessionId: string, supabase: any): Promise<string> {
+const SECTION_LABEL: Record<typeof STAR_KEYS[number], string> = {
+  situation: 'the Situation', task: 'the Task', action: 'the Action', result: 'the Result',
+};
+
+// A gap shorter than this is "I refreshed the page" — re-narrating context to
+// someone who was here two minutes ago is silly. Longer than this and they have
+// genuinely come back, so orient them.
+const RESUME_RECAP_GAP_MS = 10 * 60 * 1000;
+
+// Fresh vs. resumed opening lines. Kept short on purpose — this is read aloud, so
+// every extra sentence is dead airtime before the user can start. Theme
+// suggestions are offered by the coach only if the user asks.
+function buildOpening(story: Story | null, resumed: boolean): string {
+  if (!resumed || !story) {
+    return `Hey! We have 20 minutes to deliver an impactful STAR story. Do you have a specific question in mind, or would you like my recommendation?`;
+  }
+
+  const gapMs = Date.now() - new Date(story.updatedAt).getTime();
+  if (gapMs < RESUME_RECAP_GAP_MS) {
+    return `Welcome back — let's pick up right where we left off.`;
+  }
+
+  if (!story.extractedQuestion) {
+    return `Welcome back! Last time we were still exploring which experience to build on. Let's pick that up — what were you thinking?`;
+  }
+
+  const green = STAR_KEYS.filter(k => !!story.starSections[k]);
+  const next = STAR_KEYS.find(k => !story.starSections[k]);
+  const intro = `Welcome back! We're picking up your story for the question: ${story.extractedQuestion}`;
+
+  if (!next) {
+    return `${intro} All four parts are already solid, so this sitting is for polishing. What would you like to sharpen?`;
+  }
+  if (green.length === 0) {
+    return `${intro} Let's start building ${SECTION_LABEL[next]}. Ready when you are.`;
+  }
+  const solid = green.map(k => SECTION_LABEL[k]).join(green.length === 2 ? ' and ' : ', ');
+  return `${intro} So far ${solid} ${green.length === 1 ? 'is' : 'are'} solid. Let's keep going with ${SECTION_LABEL[next]}. Ready when you are.`;
+}
+
+export async function startSession(
+  sessionId: string,
+  supabase: any,
+  opts: { resumed?: boolean } = {}
+): Promise<string> {
   const session = await loadSession(sessionId, supabase);
   if (!session) throw new Error('Session not found');
   const story = await loadStory(session, supabase);
 
-  // Kept short on purpose — this is read aloud, so every extra sentence is dead
-  // airtime before the user can start. Theme suggestions are offered by the coach
-  // only if the user asks for a recommendation.
-  const openingMessage = `Hey! We have 20 minutes to deliver an impactful STAR story. Do you have a specific question in mind, or would you like my recommendation?`;
+  const openingMessage = buildOpening(story, !!opts.resumed);
 
   session.conversationHistory.push({
     role: 'assistant',
