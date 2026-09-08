@@ -54,6 +54,8 @@ export interface Story {
   targetCompany: string | null;
   extractedFlags: Array<{ flag: string; suggestion: string }> | null;
   experienceSegments: ExperienceSegment[];
+  // One-tab lock: which session currently holds this story (null = none).
+  activeSessionId: string | null;
   // Every earlier session's transcript for this story, in order. The current
   // session's turns are appended to this to form the story transcript.
   priorHistory: ConversationMessage[];
@@ -138,7 +140,7 @@ async function loadStory(session: Session, supabase: any): Promise<Story | null>
   const [{ data: s, error: sErr }, { data: logs, error: lErr }] = await Promise.all([
     supabase
       .from('stories')
-      .select('id, status, star_sections, star_status, extracted_question, target_company, extracted_flags, experience_segments, updated_at')
+      .select('id, status, star_sections, star_status, extracted_question, target_company, extracted_flags, experience_segments, active_session_id, updated_at')
       .eq('id', session.storyId)
       .single(),
     supabase
@@ -164,6 +166,7 @@ async function loadStory(session: Session, supabase: any): Promise<Story | null>
     targetCompany: s.target_company || null,
     extractedFlags: s.extracted_flags || null,
     experienceSegments: Array.isArray(s.experience_segments) ? s.experience_segments : [],
+    activeSessionId: s.active_session_id || null,
     priorHistory: (logs ?? []).flatMap((l: any) => l.conversation_history || []),
     updatedAt: s.updated_at,
   };
@@ -398,6 +401,26 @@ function applyExtraction(
   return updates;
 }
 
+// Thrown by handleUserMessageStream when another tab has taken this story over.
+// The respond endpoint turns it into a typed SSE error so the client can show its
+// in-page card instead of a generic failure.
+export class SupersededError extends Error {
+  constructor(public readonly heldBy: string) {
+    super('superseded');
+  }
+}
+
+// Release the one-tab lock if THIS session holds it. Idempotent: a session that
+// doesn't hold it (already taken over, or never locked) is a no-op.
+async function releaseLock(session: Session, supabase: any) {
+  if (!session.storyId) return;
+  const { error } = await supabase.rpc('release_story_session', {
+    p_story_id: session.storyId,
+    p_session_id: session.id,
+  });
+  if (error) console.error('release_story_session failed:', error.message);
+}
+
 // ── Streaming handler (writes SSE to a writable controller) ──
 export async function handleUserMessageStream(
   sessionId: string,
@@ -409,6 +432,15 @@ export async function handleUserMessageStream(
   if (!session) throw new Error('Session not found');
   if (session.status === 'completed') throw new Error('Session already completed');
   const story = await loadStory(session, supabase);
+
+  // Second layer of takeover enforcement (the heartbeat is the first). Without
+  // this, a tab that lost the lock keeps appending turns and produces exactly the
+  // interleaved transcript the lock exists to prevent. Checked on EVERY turn, not
+  // just at start. Its turn is dropped, not recorded.
+  if (story && story.activeSessionId && story.activeSessionId !== session.id) {
+    await supabase.from('session_logs').update({ status: 'abandoned' }).eq('session_id', session.id);
+    throw new SupersededError(story.activeSessionId);
+  }
 
   session.conversationHistory.push({
     role: 'user',
@@ -422,6 +454,7 @@ export async function handleUserMessageStream(
     session.status = 'completed';
     session.completedAt = new Date().toISOString();
     await persistSession(sessionId, session, supabase, story);
+    await releaseLock(session, supabase);
     writer.write(`data: ${JSON.stringify({ type: 'chunk', text: closingMessage })}\n\n`);
     writer.write(`data: ${JSON.stringify({ type: 'done', message: closingMessage, done: true, remainingMs: 0 })}\n\n`);
     writer.end();
@@ -518,6 +551,7 @@ export async function endSession(sessionId: string, supabase: any) {
 
   session.status = 'completed';
   session.completedAt = new Date().toISOString();
+  await releaseLock(session, supabase);
 
   const durationMs = session.completedAt && session.startedAt
     ? new Date(session.completedAt).getTime() - new Date(session.startedAt).getTime()
