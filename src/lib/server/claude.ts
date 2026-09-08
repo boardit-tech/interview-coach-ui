@@ -177,7 +177,7 @@ IMPORTANT RULES:
 - If they seem stuck, offer prompts that guide them to think deeper in some directions, or encourage to ask clarification questions.
 - Be warm and conversational, not clinical
 - NEVER re-ask about something the user already told you. Before asking a question, mentally check: did the user already cover this in a previous response? If so, acknowledge what they said and probe DEEPER or move to the NEXT topic. Repeating questions wastes session time and frustrates the user. If the user gave a long answer covering multiple topics, acknowledge the breadth before narrowing in on what needs more detail.
-- PACING IS CRITICAL: A 20-minute session goes fast. Don't over-probe one section. Aim to cover Situation by ~5 min, Task by ~8 min, Action by ~14 min, Result by ~17 min. If you're behind, compress — combine probing, or move on with what you have.
+- A story can span more than one sitting; you'll be told which kind this one is. PACING IS CRITICAL: A 20-minute session goes fast. Don't over-probe one section. Aim to cover Situation by ~5 min, Task by ~8 min, Action by ~14 min, Result by ~17 min. If you're behind, compress — combine probing, or move on with what you have.
 
 QUESTION-STORY ALIGNMENT: The finalized STAR story must clearly answer the interview question the user chose to practice. Keep the question's theme front and center throughout coaching. For example, if the question is about a mistake, probe for the actual mistake and what went wrong — don't let the user sanitize it into a pure success story. If about conflict, surface the real disagreement. If about failure, the failure must be visible.
 
@@ -205,63 +205,94 @@ function getMaxTokens(conversationHistory: ConversationMessage[]): number {
 }
 
 // ── Build pacing context from time + STAR progress ──
+export type SittingMode = 'fresh' | 'continue' | 'polish';
+
+// Per-turn pacing. Decided 2026-09-08:
+//   fresh    — the 20-minute push to get the WHOLE story out, milestones as before.
+//   continue — the same push, aimed at the sections still missing; never re-asks
+//              what's in the transcript; doesn't reopen solid sections.
+//   polish   — all four solid; no agenda, probe only what the user raises.
+// Past 17 minutes every mode wraps the SITTING, never promises a polished story
+// unless all four sections are green.
 function buildPacingContext(
   elapsedMinutes: number | undefined,
-  starProgress: { situation: boolean; task: boolean; action: boolean; result: boolean }
+  starProgress: { situation: boolean; task: boolean; action: boolean; result: boolean },
+  mode: SittingMode = 'fresh'
 ): string {
   if (elapsedMinutes === undefined) return '';
 
-  const filled = [
-    starProgress.situation ? 'Situation' : null,
-    starProgress.task ? 'Task' : null,
-    starProgress.action ? 'Action' : null,
-    starProgress.result ? 'Result' : null,
-  ].filter(Boolean);
-  const missing = [
-    !starProgress.situation ? 'Situation' : null,
-    !starProgress.task ? 'Task' : null,
-    !starProgress.action ? 'Action' : null,
-    !starProgress.result ? 'Result' : null,
-  ].filter(Boolean);
+  const order = ['situation', 'task', 'action', 'result'] as const;
+  const label = { situation: 'Situation', task: 'Task', action: 'Action', result: 'Result' };
+  const filled = order.filter(k => starProgress[k]).map(k => label[k]);
+  const missing = order.filter(k => !starProgress[k]).map(k => label[k]);
+  const allGreen = missing.length === 0;
 
   const progressLine = filled.length > 0
     ? `Sections captured so far: ${filled.join(', ')}. Still needed: ${missing.join(', ')}.`
     : `No sections captured yet. Still needed: ${missing.join(', ')}.`;
 
+  const modeLine = {
+    fresh: 'First sitting on this story.',
+    continue: 'Continuing a story from an earlier sitting. Do NOT re-ask anything already in the transcript, and do not reopen sections that are already solid unless the user raises them.',
+    polish: 'All four sections are solid; this sitting is for sharpening. No agenda of your own — probe only what the user raises, and hand control back after each change.',
+  }[mode];
+
+  // Wrap rule, shared by every mode.
+  const wrapNow = allGreen
+    ? 'URGENT: wrap up now. Acknowledge the story is solid and tell the user you will polish it into the final version. Do NOT mention minutes. No new questions.'
+    : `URGENT: wrap up now. Say which sections are solid and that ${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} still to come, and that the next sitting picks up right there. Do NOT mention minutes, do NOT promise a polished story, no new questions.`;
+
   let urgency = '';
   if (elapsedMinutes > 17) {
-    urgency = 'URGENT: Session is wrapping up soon. Do NOT mention specific minutes remaining to the user. Just naturally start wrapping up — summarize what you have, tell the user you will put together their polished story now. Do not ask more questions.';
+    urgency = wrapNow;
+  } else if (mode === 'polish') {
+    if (elapsedMinutes > 15) urgency = 'Time is almost up. Finish the change the user is making, then offer to produce the final version.';
   } else if (elapsedMinutes > 15) {
-    if (missing.length > 0) {
-      urgency = `Time is almost up and ${missing.join(', ')} still missing. Quickly probe for any remaining gaps — even brief answers help.`;
-    } else {
-      urgency = 'Time is almost up but all sections are covered. Wrap up and congratulate the user.';
+    urgency = allGreen
+      ? 'Time is almost up and all sections are covered. Wrap up and congratulate the user.'
+      : `Time is almost up and ${missing.join(', ')} still missing. Quickly probe for any remaining gaps — even brief answers help.`;
+  } else if (mode === 'fresh') {
+    if (elapsedMinutes > 12) {
+      if (!starProgress.action) {
+        urgency = 'Past the 12-minute mark and Action is still missing — move there NOW. Ask what specific steps they took.';
+      } else if (!starProgress.result) {
+        urgency = 'Past 12 minutes. Action is covered — transition to Result. Ask about outcomes and metrics.';
+      } else if (missing.length > 0) {
+        urgency = `Running short on time. ${missing.join(' and ')} still needed — address ${missing.length === 1 ? 'it' : 'them'} now.`;
+      }
+    } else if (elapsedMinutes > 8) {
+      if (!starProgress.situation) {
+        urgency = 'Over halfway through and Situation still not solid. Wrap it up and move to Task/Action.';
+      } else if (!starProgress.task) {
+        urgency = 'Situation is covered. Move to Task — what was the user specifically responsible for?';
+      } else {
+        urgency = 'Good progress. Transition to Action if you haven\'t — probe for specific "I" statements.';
+      }
+    } else if (elapsedMinutes > 5) {
+      urgency = !starProgress.situation
+        ? 'A third through the session. Focus on nailing down the Situation — context, stakes, and counterfactual.'
+        : 'Situation is covered. Start transitioning to Task.';
     }
-  } else if (elapsedMinutes > 12) {
-    if (!starProgress.action) {
-      urgency = 'Past the 12-minute mark and Action is still missing — move there NOW. Ask what specific steps they took.';
-    } else if (!starProgress.result) {
-      urgency = 'Past 12 minutes. Action is covered — transition to Result. Ask about outcomes and metrics.';
-    } else if (missing.length > 0) {
-      urgency = `Running short on time. ${missing.join(' and ')} still needed — address ${missing.length === 1 ? 'it' : 'them'} now.`;
-    }
-  } else if (elapsedMinutes > 8) {
-    if (!starProgress.situation) {
-      urgency = 'Over halfway through and Situation still not solid. Wrap it up and move to Task/Action.';
-    } else if (!starProgress.task) {
-      urgency = 'Situation is covered. Move to Task — what was the user specifically responsible for?';
-    } else {
-      urgency = 'Good progress. Transition to Action if you haven\'t — probe for specific "I" statements.';
-    }
-  } else if (elapsedMinutes > 5) {
-    if (!starProgress.situation) {
-      urgency = 'A third through the session. Focus on nailing down the Situation — context, stakes, and counterfactual.';
-    } else {
-      urgency = 'Situation is covered. Start transitioning to Task.';
+  } else {
+    // continue: the fresh milestones, re-spread over what is still missing.
+    // 1 missing -> solid by 10 then deepen; 2 -> 8, 16; 3 -> 5, 11, 16.
+    const m = missing.length;
+    if (m > 0) {
+      const deadlines = m === 1 ? [10] : Array.from({ length: m }, (_, i) => Math.round((16 * (i + 1)) / m));
+      const i = 0; // the first missing section is always the current target
+      const target = missing[i];
+      const due = deadlines[i];
+      if (elapsedMinutes > due) {
+        urgency = `Past the ${due}-minute mark and ${target} is still not solid — get it there NOW, then move on${m > 1 ? ` to ${missing[1]}` : ''}.`;
+      } else if (elapsedMinutes > due - 3) {
+        urgency = `Focus on ${target} now — it should be solid within a couple of minutes.`;
+      } else if (m === 1 && elapsedMinutes > 10) {
+        urgency = `${target} is solid. Use the remaining time to deepen it — specifics, numbers, decisions — not to reopen other sections.`;
+      }
     }
   }
 
-  return `\n\n[Session time: ${Math.round(elapsedMinutes)} min of 20. ${progressLine}${urgency ? ' ' + urgency : ''}]`;
+  return `\n\n[Sitting: ${mode}. Session time: ${Math.round(elapsedMinutes)} min of 20. ${modeLine} ${progressLine}${urgency ? ' ' + urgency : ''}]`;
 }
 
 // ── Streaming coach response ──
@@ -272,7 +303,8 @@ export async function streamCoachResponse(
   onChunk: (chunk: string) => void,
   starSections?: { situation: string | null; task: string | null; action: string | null; result: string | null },
   supabase?: any,
-  targetCompany?: string | null
+  targetCompany?: string | null,
+  mode: SittingMode = 'fresh'
 ): Promise<string> {
   const starProgress = {
     situation: !!starSections?.situation,
@@ -280,7 +312,7 @@ export async function streamCoachResponse(
     action: !!starSections?.action,
     result: !!starSections?.result,
   };
-  const pacingContext = buildPacingContext(elapsedMinutes, starProgress);
+  const pacingContext = buildPacingContext(elapsedMinutes, starProgress, mode);
 
   const systemMessages: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
     { type: 'text', text: COACH_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },

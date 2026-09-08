@@ -2,7 +2,8 @@ import { env } from '$env/dynamic/private';
 import {
   streamCoachResponse,
   extractStarSections,
-  type ConversationMessage
+  type ConversationMessage,
+  type SittingMode
 } from './claude';
 
 const STAR_KEYS = ['situation', 'task', 'action', 'result'] as const;
@@ -217,6 +218,16 @@ export function activeExperienceTurns(
   return out;
 }
 
+// Which kind of sitting this is. Derived per turn from state rather than fixed at
+// session start: a second sitting that starts with nothing green IS a fresh sitting
+// (the foundation isn't laid), and if a section turns green mid-way the re-spread
+// continue milestones are close enough to the fresh ones that the flip is harmless.
+function sittingMode(session: Session, story: Story | null): SittingMode {
+  if (story?.status === 'complete') return 'polish';
+  const anyGreen = STAR_KEYS.some(k => !!session.starSections[k]);
+  return story && story.priorHistory.length > 0 && anyGreen ? 'continue' : 'fresh';
+}
+
 // ── Persist session state (and, when there is one, the story's) to Supabase ──
 //
 // The session row keeps a per-sitting snapshot of the STAR fields: the dashboard's
@@ -309,7 +320,7 @@ const RESUME_RECAP_GAP_MS = 10 * 60 * 1000;
 // suggestions are offered by the coach only if the user asks.
 function buildOpening(story: Story | null, resumed: boolean): string {
   if (!resumed || !story) {
-    return `Hey! We have 20 minutes to deliver an impactful STAR story. Do you have a specific question in mind, or would you like my recommendation?`;
+    return `Hey! Let's build you an interview-ready STAR story. We'll work in focused 20-minute sittings — that's enough to get a whole story out without burning you out, and you can always come back to sharpen it. Do you have a specific question in mind, or would you like my recommendation?`;
   }
 
   const gapMs = Date.now() - new Date(story.updatedAt).getTime();
@@ -323,16 +334,16 @@ function buildOpening(story: Story | null, resumed: boolean): string {
 
   const green = STAR_KEYS.filter(k => !!story.starSections[k]);
   const next = STAR_KEYS.find(k => !story.starSections[k]);
-  const intro = `Welcome back! We're picking up your story for the question: ${story.extractedQuestion}`;
+  const intro = `Welcome back! We're picking up your story for the question: ${story.extractedQuestion}.`;
 
   if (!next) {
-    return `${intro} All four parts are already solid, so this sitting is for polishing. What would you like to sharpen?`;
+    return `Welcome back! All four parts of your story are solid, so this sitting is for sharpening. We have 20 minutes — what would you like to tighten up?`;
   }
   if (green.length === 0) {
-    return `${intro} Let's start building ${SECTION_LABEL[next]}. Ready when you are.`;
+    return `${intro} Fresh 20 minutes, fresh energy — let's get ${SECTION_LABEL[next]} solid first. Ready when you are.`;
   }
   const solid = green.map(k => SECTION_LABEL[k]).join(green.length === 2 ? ' and ' : ', ');
-  return `${intro} So far ${solid} ${green.length === 1 ? 'is' : 'are'} solid. Let's keep going with ${SECTION_LABEL[next]}. Ready when you are.`;
+  return `${intro} So far ${solid} ${green.length === 1 ? 'is' : 'are'} solid. We've got another focused 20 minutes — let's get ${SECTION_LABEL[next]} there. Ready when you are.`;
 }
 
 export async function startSession(
@@ -604,7 +615,8 @@ export async function handleUserMessageStream(
       },
       session.starSections,
       supabase,
-      session.targetCompany
+      session.targetCompany,
+      sittingMode(session, story)
     );
   }
 
