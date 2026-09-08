@@ -62,6 +62,23 @@
 	const signalText = (item: any) => item.evidence ?? item.detail ?? item.explanation ?? '';
 
 	const hasSignals = (story: any) => strengthsOf(story).length > 0 || growthOf(story).length > 0;
+
+	// A story exists from its first sitting now (not just at save time), so the
+	// bank shows in-progress ones with a way back in. Everything a resume needs is
+	// the story id — it goes in the URL so a refresh resumes rather than restarts.
+	const inProgress = (story: any) => story.status === 'in_progress';
+	const titleOf = (story: any) => story.question || story.extracted_question || null;
+	const greenCount = (story: any) =>
+		SECTION_KEYS.filter(k => !!story.star_sections?.[k]).length;
+	const lastActive = (story: any) => {
+		const d = new Date(story.updated_at || story.created_at);
+		const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+		if (days === 0) return 'today';
+		if (days === 1) return 'yesterday';
+		if (days < 7) return `${days} days ago`;
+		return formatDate(d.toISOString());
+	};
+	const resume = (story: any) => goto(`/storybuilder?story=${story.id}`);
 </script>
 
 <div class="sb-page">
@@ -71,7 +88,7 @@
 	<div class="sb-inner">
 		<div class="sb-header">
 			<h1>My Story Bank</h1>
-			<p class="sb-subtitle">Review your polished narratives from previous coaching sessions.</p>
+			<p class="sb-subtitle">Your finished stories, and the ones still in the works.</p>
 		</div>
 
 		{#if stories.length === 0}
@@ -86,21 +103,49 @@
 				{#each stories as story}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
-					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-incomplete={story.tier === 'partial'} on:click={() => toggleExpand(story.id)}>
+					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-incomplete={!inProgress(story) && story.tier === 'partial'} class:sb-story-inprogress={inProgress(story)} on:click={() => toggleExpand(story.id)}>
 						<div class="sb-story-top">
 							<div class="sb-story-info">
-								{#if story.tier === 'partial'}
+								{#if inProgress(story)}
+									<span class="sb-story-badge sb-badge-progress">In progress · {greenCount(story)} of 4 sections solid</span>
+								{:else if story.tier === 'partial'}
 									<span class="sb-story-badge">Incomplete</span>
 								{/if}
-								<h3 class:untitled={!story.question}>{story.question || 'Undefined interview question'}</h3>
+								<h3 class:untitled={!titleOf(story)}>{titleOf(story) || (inProgress(story) ? 'Untitled story — question not settled yet' : 'Undefined interview question')}</h3>
 							</div>
 							<div class="sb-story-meta">
-								<span class="sb-story-date">{formatDate(story.created_at)}</span>
+								{#if inProgress(story)}
+									<span class="sb-story-date">last worked on {lastActive(story)}</span>
+									<button class="sb-continue-btn" on:click|stopPropagation={() => resume(story)}>Continue</button>
+								{:else}
+									<span class="sb-story-date">{formatDate(story.created_at)}</span>
+									<button class="sb-sharpen-btn" on:click|stopPropagation={() => resume(story)}>Sharpen</button>
+								{/if}
 								<span class="sb-story-toggle">{expandedId === story.id ? '▲' : '▼'}</span>
 							</div>
 						</div>
 
-						{#if expandedId === story.id}
+						{#if expandedId === story.id && inProgress(story)}
+							<div class="sb-story-body" on:click|stopPropagation>
+								{#if greenCount(story) > 0}
+									<div class="sb-section">
+										<h4>Solid so far</h4>
+										<div class="sb-tp-grid">
+											{#each SECTION_KEYS as sKey}
+												{#if story.star_sections?.[sKey]}
+													<div class="sb-tp-group">
+														<span class="sb-tp-label">{sKey.charAt(0).toUpperCase() + sKey.slice(1)}</span>
+														<p class="sb-story-text sb-story-text-sm">{story.star_sections[sKey]}</p>
+													</div>
+												{/if}
+											{/each}
+										</div>
+									</div>
+								{:else}
+									<p class="sb-signals-hint">Nothing solid yet — pick up where you left off and the sections will fill in as you go.</p>
+								{/if}
+							</div>
+						{:else if expandedId === story.id}
 							<div class="sb-story-body" on:click|stopPropagation>
 								{#if story.full_story}
 									<div class="sb-section">
@@ -316,6 +361,40 @@
 		border-radius: 10px;
 		padding: 2px 8px;
 		margin-bottom: 6px;
+	}
+	/* In-progress stories: the resumable ones. */
+	.sb-story-card.sb-story-inprogress {
+		border-color: #f3d9c9;
+		border-style: solid;
+	}
+	.sb-badge-progress {
+		color: #9a4a2e;
+		background: #fbe7dc;
+	}
+	.sb-continue-btn, .sb-sharpen-btn {
+		border: none;
+		border-radius: 20px;
+		padding: 7px 16px;
+		font-size: 0.82rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 0.2s, transform 0.1s;
+		&:hover { transform: translateY(-1px); }
+	}
+	.sb-continue-btn {
+		background: #c96442;
+		color: white;
+		&:hover { background: #b5593a; }
+	}
+	.sb-sharpen-btn {
+		background: transparent;
+		color: #c96442;
+		border: 1px solid #c96442;
+		&:hover { background: #fbe7dc; }
+	}
+	.sb-story-text-sm {
+		font-size: 0.84rem;
+		line-height: 1.5;
 	}
 	.sb-story-info h3.untitled {
 		font-style: italic;

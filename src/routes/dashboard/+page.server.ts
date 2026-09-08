@@ -16,9 +16,9 @@ export const load: PageServerLoad = async ({ locals, parent, depends }) => {
     // Fetch recent stories (last 3)
     const { data: recentStories } = await locals.supabase
         .from('stories')
-        .select('id, question, created_at, tier')
+        .select('id, question, created_at, tier, status, extracted_question, star_sections, updated_at')
         .eq('user_id', userId)
-        .order('created_at', { ascending: false })
+        .order('updated_at', { ascending: false })
         .limit(3);
 
     // Count total stories

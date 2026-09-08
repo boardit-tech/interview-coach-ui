@@ -127,7 +127,7 @@
 			</div>
 		</div>
 
-		<!-- Completed stories -->
+		<!-- Recent stories (in-progress ones link straight back into the session) -->
 		<div class="dash-section">
 			<div class="dash-section-header">
 				<h3>Recent Stories</h3>
@@ -140,14 +140,19 @@
 			{:else}
 				<div class="dash-stories-grid">
 					{#each recentStories as story}
-						<a href="/stories" class="dash-story-card" class:incomplete={story.tier === 'partial'}>
-							{#if story.tier === 'partial'}
+						{@const inProgress = story.status === 'in_progress'}
+						{@const title = story.question || story.extracted_question}
+						{@const green = ['situation', 'task', 'action', 'result'].filter(k => !!story.star_sections?.[k]).length}
+						<a href={inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:incomplete={!inProgress && story.tier === 'partial'} class:inprogress={inProgress}>
+							{#if inProgress}
+								<span class="dash-story-badge dash-badge-progress">In progress · {green}/4</span>
+							{:else if story.tier === 'partial'}
 								<span class="dash-story-badge">Incomplete</span>
 							{/if}
-							<span class="dash-story-title" class:untitled={!story.question}>
-								{story.question || 'Undefined interview question'}
+							<span class="dash-story-title" class:untitled={!title}>
+								{title || (inProgress ? 'Untitled story' : 'Undefined interview question')}
 							</span>
-							<span class="dash-story-date">{formatDate(story.created_at)}</span>
+							<span class="dash-story-date">{inProgress ? 'Continue →' : formatDate(story.created_at)}</span>
 						</a>
 					{/each}
 				</div>
@@ -423,6 +428,14 @@
 	.dash-story-card.incomplete {
 		background: #fdeceb;
 		border: 1px dashed #f0b8b2;
+	}
+	/* In-progress stories: resumable, so the card links straight into the session. */
+	.dash-story-card.inprogress {
+		border: 1px solid #f3d9c9;
+	}
+	.dash-badge-progress {
+		color: #9a4a2e !important;
+		background: #fbe7dc !important;
 	}
 	.dash-story-badge {
 		align-self: flex-start;
