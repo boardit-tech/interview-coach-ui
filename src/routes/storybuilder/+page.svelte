@@ -906,6 +906,7 @@
 		}).then(res => res.json()).then(data => {
 			if (data.saved) {
 				savedStoryId = data.id;
+				if (data.status === 'complete' || data.status === 'in_progress') storyStatus = data.status;
 				// Refresh cached Dashboard/Story Bank data so the new story shows
 				// up without a hard refresh.
 				invalidate('app:stories');
@@ -1016,6 +1017,25 @@
 		}).catch(err => console.warn('Failed to log glitch:', err));
 	}
 
+	// Back into the SAME story: the lobby shows what's being resumed (4.6) and the
+	// Start button reads "Continue". Session-level state resets; the story's state
+	// comes back from the server on start.
+	function handleContinueStory() {
+		if (!storyId) return handleBuildAnother();
+		resumeStoryId = storyId;
+		setStoryInUrl(storyId);
+		phase = 'lobby';
+		messages = [];
+		sessionId = null;
+		report = null;
+		assessment = null;
+		userConfirmedEnd = false;
+		sessionExpired = false;
+		pendingAutoEnd = false;
+		extractedFlags = null;
+		ttsStop();
+	}
+
 	function handleBuildAnother() {
 		phase = 'lobby';
 		messages = [];
@@ -1023,6 +1043,8 @@
 		storyId = null;
 		resumeStoryId = null;
 		setStoryInUrl(null);
+		sessionExpired = false;
+		pendingAutoEnd = false;
 		report = null;
 		assessment = null;
 		userConfirmedEnd = false;
@@ -1453,8 +1475,15 @@
 
 			{#if !report?.error && assessment}
 				<div class="sb-scorecard-actions">
-					<button class="sb-start-btn" on:click={handleBuildAnother}>Build another story</button>
-					<a href="/dashboard" class="sb-error-dashboard-link">Back to Dashboard</a>
+					{#if storyId}
+						<button class="sb-start-btn" on:click={handleContinueStory}>
+							{storyStatus === 'complete' ? 'Sharpen this story' : 'Continue this story'}
+						</button>
+						<button class="sb-start-btn sb-start-btn-secondary" on:click={handleBuildAnother}>Start a new story</button>
+					{:else}
+						<button class="sb-start-btn" on:click={handleBuildAnother}>Build another story</button>
+					{/if}
+					<a href="/stories" class="sb-error-dashboard-link">My Story Bank</a>
 				</div>
 			{/if}
 		</div>
@@ -1707,6 +1736,12 @@
 	.sb-start-btn:hover { background: #b5593a; transform: translateY(-1px); }
 	.sb-start-btn:active { transform: translateY(0); }
 	.sb-start-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+	.sb-start-btn-secondary {
+		background: transparent;
+		color: #c96442;
+		border: 1px solid #c96442;
+	}
+	.sb-start-btn-secondary:hover { background: #fbe7dc; }
 
 	/* ── Coaching Layout ── */
 	.sb-coaching-layout {
