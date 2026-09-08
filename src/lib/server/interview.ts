@@ -1,3 +1,4 @@
+import { env } from '$env/dynamic/private';
 import {
   streamCoachResponse,
   extractStarSections,
@@ -10,6 +11,15 @@ const STAR_KEYS = ['situation', 'task', 'action', 'result'] as const;
 // COACH_SYSTEM_PROMPT so the moment reads the same as before — minus the recap.
 const HANDBACK_LINE =
   "We've got good material for all four parts of your story now. Is there anything you'd like to add or revisit? Or if you're happy with where we are, we can wrap up and I'll polish it into a final version.";
+
+// Off-topic guard (decided 2026-09-07). Consecutive off_topic flags from the
+// extractor: 1 = log only, 2 = speak REDIRECT_LINE instead of the coach, 3 = end
+// the sitting with CLOSING_LINE. Any on-topic turn resets the count. A confirmed
+// experience switch once something is green also ends with CLOSING_LINE.
+const redirectLine = (question: string | null) =>
+  `Let's stay with the story we're building — the one for ${question ?? 'the question we settled on'}. If that other experience deserves its own story, we can start it fresh afterwards. So, back to where we were.`;
+const CLOSING_LINE =
+  "I think that other experience wants to be its own story, and this one deserves to be finished on its own. Let's wrap this sitting here — you can pick either one up any time.";
 
 const SESSION_LIMIT_MS = 20 * 60 * 1000; // 20 minutes
 
@@ -75,6 +85,7 @@ export interface Session {
   extractedQuestion: string | null;
   targetCompany: string | null;
   extractedFlags: Array<{ flag: string; suggestion: string }> | null;
+  offTopicStrikes: number;
   startedAt: string;
   completedAt: string | null;
   report: any;
@@ -101,7 +112,7 @@ async function loadSession(sessionId: string, supabase: any): Promise<Session | 
 
   const { data, error } = await supabase
     .from('session_logs')
-    .select('session_id, story_id, created_at, status, conversation_history, star_sections, extracted_question, extracted_flags, target_company')
+    .select('session_id, story_id, created_at, status, conversation_history, star_sections, extracted_question, extracted_flags, target_company, off_topic_strikes')
     .eq('session_id', sessionId)
     .single();
 
@@ -119,6 +130,7 @@ async function loadSession(sessionId: string, supabase: any): Promise<Session | 
     extractedQuestion: data.extracted_question || null,
     targetCompany: data.target_company || null,
     extractedFlags: data.extracted_flags || null,
+    offTopicStrikes: data.off_topic_strikes || 0,
     startedAt: data.created_at,
     completedAt: null,
     report: null,
@@ -220,6 +232,7 @@ async function persistSession(sessionId: string, session: Session, supabase: any
         extracted_question: session.extractedQuestion,
         target_company: session.targetCompany,
         extracted_flags: session.extractedFlags,
+        off_topic_strikes: session.offTopicStrikes,
       })
       .eq('session_id', sessionId);
     if (error) console.error('Failed to persist session state:', error.message);
@@ -260,6 +273,7 @@ export function createSession(storyId: string | null = null): Session {
     extractedQuestion: null,
     targetCompany: null,
     extractedFlags: null,
+    offTopicStrikes: 0,
     startedAt: new Date().toISOString(),
     completedAt: null,
     report: null,
@@ -401,6 +415,61 @@ function applyExtraction(
   return updates;
 }
 
+// Switch the active experience (only ever called while nothing is green). Closes
+// the open segment at `atTurn` (the index of the user's request in the story
+// transcript — that message usually already contains the new experience) and
+// opens a new one: a fresh exp number for "new", or the most recent OTHER exp for
+// "previous" (falls back to "new" if there is none).
+function switchExperience(story: Story, atTurn: number, target: 'new' | 'previous') {
+  const segs = story.experienceSegments;
+  const activeExp = segs.length ? segs[segs.length - 1].exp : 0;
+  if (segs.length === 0) segs.push({ from: 0, to: null, exp: 0 });
+  segs[segs.length - 1].to = atTurn;
+
+  let exp: number;
+  if (target === 'previous') {
+    const prev = [...segs].reverse().find(sg => sg.exp !== activeExp);
+    exp = prev ? prev.exp : Math.max(...segs.map(sg => sg.exp)) + 1;
+  } else {
+    exp = Math.max(...segs.map(sg => sg.exp)) + 1;
+  }
+  segs.push({ from: atTurn, to: null, exp });
+}
+
+async function alertOffTopicClose(session: Session, reason: 'strikes' | 'switch') {
+  if (!env.ALERT_SLACK_WEBHOOK) return;
+  try {
+    await fetch(env.ALERT_SLACK_WEBHOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: `:no_entry: Sitting ended by off-topic guard (${reason})\nsession: ${session.id}\nstory: ${session.storyId}\nquestion: ${session.extractedQuestion ?? '(none)'}`,
+      }),
+    });
+  } catch (err: any) {
+    console.error('off-topic alert failed:', err.message);
+  }
+}
+
+// End the sitting from code with a spoken line (20-min mark, off-topic guard).
+async function closeSitting(
+  session: Session,
+  story: Story | null,
+  line: string,
+  reason: string,
+  writer: { write: (data: string) => void; end: () => void },
+  supabase: any
+) {
+  session.conversationHistory.push({ role: 'assistant', content: line });
+  session.status = 'completed';
+  session.completedAt = new Date().toISOString();
+  await persistSession(session.id, session, supabase, story);
+  await releaseLock(session, supabase);
+  writer.write(`data: ${JSON.stringify({ type: 'chunk', text: line })}\n\n`);
+  writer.write(`data: ${JSON.stringify({ type: 'done', message: line, done: true, reason, remainingMs: 0 })}\n\n`);
+  writer.end();
+}
+
 // Thrown by handleUserMessageStream when another tab has taken this story over.
 // The respond endpoint turns it into a typed SSE error so the client can show its
 // in-page card instead of a generic failure.
@@ -449,20 +518,59 @@ export async function handleUserMessageStream(
 
   const elapsed = Date.now() - new Date(session.startedAt).getTime();
   if (elapsed >= SESSION_LIMIT_MS) {
-    const closingMessage = "We're at the 20-minute mark! Let me wrap up what we have and put together your story report.";
-    session.conversationHistory.push({ role: 'assistant', content: closingMessage });
-    session.status = 'completed';
-    session.completedAt = new Date().toISOString();
-    await persistSession(sessionId, session, supabase, story);
-    await releaseLock(session, supabase);
-    writer.write(`data: ${JSON.stringify({ type: 'chunk', text: closingMessage })}\n\n`);
-    writer.write(`data: ${JSON.stringify({ type: 'done', message: closingMessage, done: true, remainingMs: 0 })}\n\n`);
-    writer.end();
+    await closeSitting(
+      session, story,
+      "We're at the 20-minute mark! Let me wrap up what we have and put together your story report.",
+      'time_up', writer, supabase
+    );
     return;
   }
 
   const elapsedMinutes = elapsed / 60000;
   const transcript = storyTranscript(session, story);
+  const anyGreen = STAR_KEYS.some(k => !!session.starSections[k]);
+  const extractorCtx = { lockedQuestion: session.extractedQuestion, anyGreen };
+  const extractorInputNow = () =>
+    activeExperienceTurns(storyTranscript(session, story), story?.experienceSegments ?? []);
+
+  // ── Off-topic / switch handling ───────────────────────────────────────────
+  // The extractor normally runs AFTER the coach reply (so the reply streams
+  // without waiting on it). But its verdict is what decides whether the coach
+  // should reply at all. So: once a session is in a suspicious state (a strike
+  // on record, or a switch request while something is green), the extractor
+  // runs FIRST for that turn — the user waits ~2s longer, only in that state —
+  // and its result is reused below instead of extracting twice.
+  let preExtracted: Awaited<ReturnType<typeof extractStarSections>> | undefined;
+  if (session.offTopicStrikes >= 1) {
+    preExtracted = await extractStarSections(extractorInputNow(), sessionId, supabase, extractorCtx);
+    if (preExtracted) {
+      if (anyGreen && preExtracted.switchRequested) {
+        // They were offered the choice last turn and chose to switch.
+        await alertOffTopicClose(session, 'switch');
+        await closeSitting(session, story, CLOSING_LINE, 'switch', writer, supabase);
+        return;
+      }
+      if (preExtracted.offTopic) {
+        session.offTopicStrikes += 1;
+        console.warn(`[off-topic] session=${sessionId} strike=${session.offTopicStrikes}`);
+        if (session.offTopicStrikes >= 3) {
+          await alertOffTopicClose(session, 'strikes');
+          await closeSitting(session, story, CLOSING_LINE, 'off_topic', writer, supabase);
+          return;
+        }
+        // Strike 2: fixed redirect instead of the coach.
+        const line = redirectLine(session.extractedQuestion);
+        session.conversationHistory.push({ role: 'assistant', content: line });
+        writer.write(`data: ${JSON.stringify({ type: 'chunk', text: line })}\n\n`);
+        writer.write(`data: ${JSON.stringify({ type: 'done', message: line, done: false, remainingMs: Math.max(0, SESSION_LIMIT_MS - elapsed) })}\n\n`);
+        await persistSession(sessionId, session, supabase, story);
+        writer.end();
+        return;
+      }
+      // Back on topic.
+      session.offTopicStrikes = 0;
+    }
+  }
 
   // Hand-back is driven from code, not from the prompt. COACH_SYSTEM_PROMPT already
   // says "Do NOT read back or recap the full STAR story", and the coach is handed the
@@ -522,12 +630,27 @@ export async function handleUserMessageStream(
   const userMsgCount = session.conversationHistory.filter(m => m.role === 'user').length;
   if (userMsgCount >= 1) {
     try {
-      const extractorInput = activeExperienceTurns(
-        storyTranscript(session, story),
-        story?.experienceSegments ?? []
-      );
-      const sections = await extractStarSections(extractorInput, sessionId, supabase);
+      const sections = preExtracted ?? await extractStarSections(extractorInputNow(), sessionId, supabase, extractorCtx);
       if (sections) {
+        if (!preExtracted) {
+          // First sighting of drift or a switch request this session.
+          if (sections.switchRequested && !anyGreen && story) {
+            // Free switch: nothing is green, so the experience isn't fixed yet. The
+            // user's request is the last user turn in the STORY transcript.
+            const atTurn = storyTranscript(session, story).length - 2; // -1 = coach reply just pushed
+            switchExperience(story, atTurn, sections.switchRequested);
+            console.log(`[experience-switch] session=${sessionId} target=${sections.switchRequested} atTurn=${atTurn}`);
+          } else if (sections.switchRequested && anyGreen) {
+            // The coach (prompt-driven) has just offered the two options. Arm the
+            // extractor-first path so a "yes, switch" next turn ends the sitting.
+            session.offTopicStrikes = Math.max(session.offTopicStrikes, 1);
+          } else if (sections.offTopic) {
+            session.offTopicStrikes = 1;
+            console.warn(`[off-topic] session=${sessionId} strike=1`);
+          } else {
+            session.offTopicStrikes = 0;
+          }
+        }
         const updates = applyExtraction(session, sections, sessionId);
         writer.write(`data: ${JSON.stringify({
           type: 'star_update',
@@ -595,7 +718,10 @@ export async function finalizeStarExtraction(sessionId: string, supabase: any) {
     storyTranscript(session, story),
     story?.experienceSegments ?? []
   );
-  const sections = await extractStarSections(extractorInput, sessionId, supabase);
+  const sections = await extractStarSections(extractorInput, sessionId, supabase, {
+    lockedQuestion: session.extractedQuestion,
+    anyGreen: STAR_KEYS.some(k => !!session.starSections[k]),
+  });
   if (sections) {
     applyExtraction(session, sections, sessionId);
     await persistSession(sessionId, session, supabase, story);

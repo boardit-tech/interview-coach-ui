@@ -181,7 +181,9 @@ IMPORTANT RULES:
 
 QUESTION-STORY ALIGNMENT: The finalized STAR story must clearly answer the interview question the user chose to practice. Keep the question's theme front and center throughout coaching. For example, if the question is about a mistake, probe for the actual mistake and what went wrong — don't let the user sanitize it into a pure success story. If about conflict, surface the real disagreement. If about failure, the failure must be visible.
 
-MID-SESSION QUESTION SWITCH: If the user wants to change their interview question mid-session, do NOT just restart. Warn them about the time cost: "We've already spent X minutes building context for this question — switching now means we'd be starting over with less time." Then suggest ONE closely related question that still fits the experience they've been sharing. For example, if they started with "Tell me about a time you failed" but realize their story is more about overcoming resistance, suggest "Tell me about a time you had to persuade someone who disagreed with you" — this lets them keep most of what they've already shared. Only if the user still insists on a completely different question should you pivot, and acknowledge that the story quality may be compressed due to time.
+SWITCHING EXPERIENCES OR QUESTIONS: The interview question is fixed for this story once it's been settled — a different question is a different story, and you say so plainly. The EXPERIENCE underneath it is a different matter:
+- While NO section is solid yet, switching to a different experience is normal coaching. If the first pick has no clear ending or the user thinks of a better one, say "sure, tell me about that one" and move on — briefly check the new one has an outcome they can point to. No warnings about time.
+- Once ANY section is solid (you are told which), do NOT blend two experiences — that muddies the story. Present the choice, in roughly these words: "That could work too. We've already got [the solid sections] locked in for this one, though, and mixing them would muddy the story. Two options: we keep building this one, or we wrap up here and you start a fresh story for the other project. Which do you prefer?" Then follow their choice. If they choose to switch, say you'll wrap up this sitting so they can start the other one fresh — do NOT start coaching the new experience.
 
 SUPPORTED QUESTION TYPES: This coaching tool is designed specifically for situation-based behavioral interview questions — questions that start with "Tell me about a time when..." or ask for a specific example from real work experience. These are the questions that map to the STAR framework.
 
@@ -542,11 +544,20 @@ Respond with ONLY a JSON object:
   }
 }
 
+export interface ExtractorContext {
+  // The story's question once captured. The extractor is told it so it never
+  // "re-extracts" a different one, and so off_topic has something to measure against.
+  lockedQuestion: string | null;
+  // True once any section is green: the experience is fixed, drift is off-topic.
+  anyGreen: boolean;
+}
+
 export async function extractStarSections(
   conversationHistory: ConversationMessage[],
   sessionId: string,
-  supabase?: any
-): Promise<{ question: string | null; targetCompany: string | null; status: { situation: 'green' | 'yellow' | null; task: 'green' | 'yellow' | null; action: 'green' | 'yellow' | null; result: 'green' | 'yellow' | null }; situation: string | null; task: string | null; action: string | null; result: string | null; flags: Array<{ flag: string; suggestion: string }> | null } | null> {
+  supabase?: any,
+  ctx: ExtractorContext = { lockedQuestion: null, anyGreen: false }
+): Promise<{ question: string | null; targetCompany: string | null; switchRequested: 'new' | 'previous' | null; offTopic: boolean; status: { situation: 'green' | 'yellow' | null; task: 'green' | 'yellow' | null; action: 'green' | 'yellow' | null; result: 'green' | 'yellow' | null }; situation: string | null; task: string | null; action: string | null; result: string | null; flags: Array<{ flag: string; suggestion: string }> | null } | null> {
   const extractPrompt = `You are analyzing a coaching conversation to extract STAR interview story sections. Read the conversation and extract whatever Situation, Task, Action, and Result content the user has shared so far.
 
 Rules:
@@ -565,6 +576,9 @@ Rules:
 - Extract interview red flags: scan the conversation for things the user said that would hurt them in a real interview. Examples: dismissing business context, badmouthing colleagues, not using "I" statements for their own actions, revealing they didn't understand the problem, deflecting blame. Also check if the coach already called out a red flag — include those too. For each flag, write a short "flag" (what the issue is) and "suggestion" (how to reframe it). Only include genuine red flags — not every coaching correction is a flag. If none found, set to null.
 - RECENCY RULES for flags: For POSITIVE stories (achievement, leadership, delivery), recency matters — prefer examples within the last 2-3 years. But for NEGATIVE stories (failure, mistake, conflict), OLDER is BETTER. An example that is 3+ years old is actually ideal because it shows growth and distance. Do NOT flag an old negative example as a recency concern — that is the correct strategy. Only flag recency if a POSITIVE story is very old (5+ years) and the user hasn't connected it to recent work.
 
+- EXPERIENCE TRACKING. A story is built on ONE real experience. Two more fields:
+  - "switch_requested": "new" if the user's LATEST turn explicitly asks to, or agrees to, build on a DIFFERENT experience than the one being discussed (a different project, job, or event), or to answer a different question. "previous" if they ask to go BACK to an experience discussed earlier in this conversation. null otherwise. Only the latest user turn counts — never re-flag an earlier request.
+  - "off_topic": true ONLY when [STORY CONTEXT] says the sections are locked, AND the user's latest turn (or two) describes a different experience than the one the existing sections are built on, or answers a different question, WITHOUT an explicit request to switch. A detail, tangent, or clarification about the SAME experience is NOT off-topic. Always false when sections are not locked.
 - Assign a STATUS to each section:
   - "green" — meets that section's full bar above (interview-ready).
   - "yellow" — the user gave real, specific, on-topic content toward this section, but it's still missing at least one required element (below the green bar). Generic filler or purely second-hand content is NOT yellow — it's "none".
@@ -580,7 +594,9 @@ Respond with ONLY a JSON object:
   "task": "first person text if status is green, else null",
   "action": "first person text if status is green, else null",
   "result": "first person text if status is green, else null",
-  "flags": [{ "flag": "what the issue is", "suggestion": "how to reframe it" }] or null
+  "flags": [{ "flag": "what the issue is", "suggestion": "how to reframe it" }] or null,
+  "switch_requested": "new" | "previous" | null,
+  "off_topic": true | false
 }`;
 
   try {
@@ -615,6 +631,10 @@ Respond with ONLY a JSON object:
         // Uncached, after the cache breakpoint — the RECENCY flag rules above need
         // the real date, and this changes daily.
         { type: 'text', text: `\n\n${currentDateLine()}` },
+        {
+          type: 'text',
+          text: `\n\n[STORY CONTEXT] Locked question: ${ctx.lockedQuestion ?? 'not yet captured — extract it as usual'}. Sections locked: ${ctx.anyGreen ? 'YES — the experience is fixed; judge off_topic against it' : 'no — the user may still change experiences freely'}.`,
+        },
       ],
       messages: [
         {
@@ -653,9 +673,13 @@ Respond with ONLY a JSON object:
     };
     // Content is authoritative only for green sections — force null otherwise so the
     // "all sections filled = all green" gate downstream stays correct.
+    const switchRequested =
+      parsed.switch_requested === 'new' || parsed.switch_requested === 'previous' ? parsed.switch_requested : null;
     return {
       question: parsed.question || null,
       targetCompany: parsed.targetCompany || null,
+      switchRequested,
+      offTopic: ctx.anyGreen && parsed.off_topic === true,
       status,
       situation: status.situation === 'green' ? (parsed.situation || null) : null,
       task: status.task === 'green' ? (parsed.task || null) : null,
