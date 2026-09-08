@@ -20,11 +20,56 @@ export interface StarSections {
   result: string | null;
 }
 
+export type SectionState = 'green' | 'yellow' | null;
+export interface StarStatus {
+  situation: SectionState;
+  task: SectionState;
+  action: SectionState;
+  result: SectionState;
+}
+
+const EMPTY_SECTIONS = (): StarSections => ({ situation: null, task: null, action: null, result: null });
+const EMPTY_STATUS = (): StarStatus => ({ situation: null, task: null, action: null, result: null });
+
+// One contiguous run of turns (indices into the STORY transcript) that belong to a
+// single experience. `exp` groups runs: switching back to an earlier experience
+// opens a new run with that experience's number, so its turns can be
+// non-contiguous. The last run is always open (to = null). An empty list means
+// "everything is one experience".
+export interface ExperienceSegment {
+  from: number;
+  to: number | null;
+  exp: number;
+}
+
+// A story is the persistent object; a session is one sitting of work on it.
+// STAR state lives HERE, not on the session, so a resumed session starts where
+// the last one ended.
+export interface Story {
+  id: string;
+  status: 'in_progress' | 'complete';
+  starSections: StarSections;
+  starStatus: StarStatus;
+  extractedQuestion: string | null;
+  targetCompany: string | null;
+  extractedFlags: Array<{ flag: string; suggestion: string }> | null;
+  experienceSegments: ExperienceSegment[];
+  // Every earlier session's transcript for this story, in order. The current
+  // session's turns are appended to this to form the story transcript.
+  priorHistory: ConversationMessage[];
+  updatedAt: string;
+}
+
 export interface Session {
   id: string;
+  storyId: string | null;
   status: 'active' | 'completed' | 'story_ready';
   conversationHistory: ConversationMessage[];
+  // Mirrors of the story's state (copied in at load, written back to both the
+  // story and this session's row at persist). For a session with no story —
+  // anything created before stories became persistent — these ARE the state.
   starSections: StarSections;
+  starStatus: StarStatus;
   extractedQuestion: string | null;
   targetCompany: string | null;
   extractedFlags: Array<{ flag: string; suggestion: string }> | null;
@@ -54,7 +99,7 @@ async function loadSession(sessionId: string, supabase: any): Promise<Session | 
 
   const { data, error } = await supabase
     .from('session_logs')
-    .select('session_id, created_at, status, conversation_history, star_sections, extracted_question, extracted_flags, target_company')
+    .select('session_id, story_id, created_at, status, conversation_history, star_sections, extracted_question, extracted_flags, target_company')
     .eq('session_id', sessionId)
     .single();
 
@@ -64,9 +109,11 @@ async function loadSession(sessionId: string, supabase: any): Promise<Session | 
 
   const session: Session = {
     id: data.session_id,
+    storyId: data.story_id || null,
     status: data.status === 'started' ? 'active' : data.status,
     conversationHistory: data.conversation_history || [],
-    starSections: data.star_sections || { situation: null, task: null, action: null, result: null },
+    starSections: data.star_sections || EMPTY_SECTIONS(),
+    starStatus: EMPTY_STATUS(),
     extractedQuestion: data.extracted_question || null,
     targetCompany: data.target_company || null,
     extractedFlags: data.extracted_flags || null,
@@ -80,8 +127,87 @@ async function loadSession(sessionId: string, supabase: any): Promise<Session | 
   return session;
 }
 
-// ── Persist session state to Supabase ──
-async function persistSession(sessionId: string, session: Session, supabase: any) {
+// ── Load the story behind a session, and adopt its state ──
+//
+// Returns null (and leaves the session's own state in place) when the session has
+// no story — the pre-resumability shape — or when the story read fails, in which
+// case the session's per-row snapshot is the best state we have.
+async function loadStory(session: Session, supabase: any): Promise<Story | null> {
+  if (!session.storyId) return null;
+
+  const [{ data: s, error: sErr }, { data: logs, error: lErr }] = await Promise.all([
+    supabase
+      .from('stories')
+      .select('id, status, star_sections, star_status, extracted_question, target_company, extracted_flags, experience_segments, updated_at')
+      .eq('id', session.storyId)
+      .single(),
+    supabase
+      .from('session_logs')
+      .select('session_id, conversation_history, created_at')
+      .eq('story_id', session.storyId)
+      .neq('session_id', session.id)
+      .order('created_at', { ascending: true }),
+  ]);
+
+  if (sErr || !s) {
+    console.error('loadStory failed:', sErr?.message ?? 'no row');
+    return null;
+  }
+  if (lErr) console.error('loadStory: prior sessions read failed:', lErr.message);
+
+  const story: Story = {
+    id: s.id,
+    status: s.status,
+    starSections: s.star_sections || EMPTY_SECTIONS(),
+    starStatus: s.star_status || EMPTY_STATUS(),
+    extractedQuestion: s.extracted_question || null,
+    targetCompany: s.target_company || null,
+    extractedFlags: s.extracted_flags || null,
+    experienceSegments: Array.isArray(s.experience_segments) ? s.experience_segments : [],
+    priorHistory: (logs ?? []).flatMap((l: any) => l.conversation_history || []),
+    updatedAt: s.updated_at,
+  };
+
+  // The story is authoritative. Copy its state onto the session so the rest of the
+  // turn logic reads one place, then persistSession writes it back to both.
+  session.starSections = { ...story.starSections };
+  session.starStatus = { ...story.starStatus };
+  session.extractedQuestion = story.extractedQuestion;
+  session.targetCompany = story.targetCompany;
+  session.extractedFlags = story.extractedFlags;
+
+  return story;
+}
+
+// The full transcript the COACH sees: every earlier sitting, then this one.
+function storyTranscript(session: Session, story: Story | null): ConversationMessage[] {
+  return story ? [...story.priorHistory, ...session.conversationHistory] : session.conversationHistory;
+}
+
+// The transcript the EXTRACTOR sees: only the turns of the currently active
+// experience. The coach keeps the whole thing (it needs the abandoned experience
+// for context — "that one had no clear result, so let's make sure this one does");
+// the extractor must never see it, or it will blend two experiences into one story.
+export function activeExperienceTurns(
+  transcript: ConversationMessage[],
+  segments: ExperienceSegment[]
+): ConversationMessage[] {
+  if (segments.length === 0) return transcript;
+  const activeExp = segments[segments.length - 1].exp;
+  const out: ConversationMessage[] = [];
+  for (const seg of segments) {
+    if (seg.exp !== activeExp) continue;
+    out.push(...transcript.slice(seg.from, seg.to ?? transcript.length));
+  }
+  return out;
+}
+
+// ── Persist session state (and, when there is one, the story's) to Supabase ──
+//
+// The session row keeps a per-sitting snapshot of the STAR fields: the dashboard's
+// session list and star_sections_filled read it, and it costs nothing. The story
+// row is what the next session resumes from.
+async function persistSession(sessionId: string, session: Session, supabase: any, story?: Story | null) {
   try {
     const { error } = await supabase
       .from('session_logs')
@@ -97,16 +223,37 @@ async function persistSession(sessionId: string, session: Session, supabase: any
   } catch (err: any) {
     console.error('persistSession exception:', err.message);
   }
+
+  if (!story) return;
+  try {
+    const { error } = await supabase
+      .from('stories')
+      .update({
+        star_sections: session.starSections,
+        star_status: session.starStatus,
+        extracted_question: session.extractedQuestion,
+        target_company: session.targetCompany,
+        extracted_flags: session.extractedFlags,
+        experience_segments: story.experienceSegments,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', story.id);
+    if (error) console.error('Failed to persist story state:', error.message);
+  } catch (err: any) {
+    console.error('persistStory exception:', err.message);
+  }
 }
 
-export function createSession(): Session {
+export function createSession(storyId: string | null = null): Session {
   const id = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   const session: Session = {
     id,
+    storyId,
     status: 'active',
     conversationHistory: [],
-    starSections: { situation: null, task: null, action: null, result: null },
+    starSections: EMPTY_SECTIONS(),
+    starStatus: EMPTY_STATUS(),
     extractedQuestion: null,
     targetCompany: null,
     extractedFlags: null,
@@ -126,12 +273,15 @@ export function getSession(id: string): Session | undefined {
 /** The target company captured by the extractor, for the end-of-session summary. */
 export async function getSessionTargetCompany(sessionId: string, supabase: any): Promise<string | null> {
   const session = await loadSession(sessionId, supabase);
-  return session?.targetCompany ?? null;
+  if (!session) return null;
+  await loadStory(session, supabase);
+  return session.targetCompany ?? null;
 }
 
 export async function startSession(sessionId: string, supabase: any): Promise<string> {
   const session = await loadSession(sessionId, supabase);
   if (!session) throw new Error('Session not found');
+  const story = await loadStory(session, supabase);
 
   // Kept short on purpose — this is read aloud, so every extra sentence is dead
   // airtime before the user can start. Theme suggestions are offered by the coach
@@ -144,9 +294,67 @@ export async function startSession(sessionId: string, supabase: any): Promise<st
   });
 
   // Persist opening message to Supabase
-  await persistSession(sessionId, session, supabase);
+  await persistSession(sessionId, session, supabase, story);
 
   return openingMessage;
+}
+
+// Apply one extractor result to the session/story state. Returns the section
+// updates that actually changed (for the client's sidebar).
+function applyExtraction(
+  session: Session,
+  sections: NonNullable<Awaited<ReturnType<typeof extractStarSections>>>,
+  sessionId: string
+): { section: string; content: string }[] {
+  const updates: { section: string; content: string }[] = [];
+
+  // The question is locked once captured — for the life of the story. It is the
+  // thing that defines what this story IS; the off-topic guard measures against it.
+  if (sections.question && !session.extractedQuestion) {
+    session.extractedQuestion = sections.question;
+  }
+  // Captured once, then reused for the rest of the story by the coach and the
+  // summary — no re-scanning the transcript.
+  if (sections.targetCompany && !session.targetCompany) {
+    session.targetCompany = sections.targetCompany;
+  }
+  if (sections.flags) {
+    session.extractedFlags = sections.flags;
+  }
+  // Green text is authoritative: once a section has interview-ready text it stays
+  // green, even if a later extractor run over the same transcript is stricter.
+  // Regeneration is from scratch each turn, so without this a section could flip
+  // green -> yellow -> green with no new input, which reads as the app losing work.
+  session.starStatus = { ...sections.status };
+  for (const key of STAR_KEYS) {
+    if (session.starSections[key]) session.starStatus[key] = 'green';
+  }
+
+  for (const key of STAR_KEYS) {
+    if (sections[key] && sections[key] !== session.starSections[key]) {
+      // The extractor regenerates each section from scratch rather than editing
+      // it, so a fact captured earlier can silently vanish from a later version
+      // even though it's still in the transcript. That failure is invisible —
+      // the section still reads fine. Log dropped numbers (the highest-value and
+      // most detectable facts) so we can find out whether this actually happens
+      // before deciding whether it needs guarding. Diagnostic only: nothing
+      // branches on it.
+      const prev = session.starSections[key];
+      if (prev) {
+        const numbersIn = (t: string) => new Set(t.match(/\d[\d,.]*%?/g) ?? []);
+        const after = numbersIn(sections[key]!);
+        const dropped = [...numbersIn(prev)].filter(n => !after.has(n));
+        if (dropped.length) {
+          console.warn(
+            `[section-drop] session=${sessionId} section=${key} dropped=${dropped.join('|')}`
+          );
+        }
+      }
+      session.starSections[key] = sections[key];
+      updates.push({ section: key, content: sections[key]! });
+    }
+  }
+  return updates;
 }
 
 // ── Streaming handler (writes SSE to a writable controller) ──
@@ -159,6 +367,7 @@ export async function handleUserMessageStream(
   const session = await loadSession(sessionId, supabase);
   if (!session) throw new Error('Session not found');
   if (session.status === 'completed') throw new Error('Session already completed');
+  const story = await loadStory(session, supabase);
 
   session.conversationHistory.push({
     role: 'user',
@@ -171,7 +380,7 @@ export async function handleUserMessageStream(
     session.conversationHistory.push({ role: 'assistant', content: closingMessage });
     session.status = 'completed';
     session.completedAt = new Date().toISOString();
-    await persistSession(sessionId, session, supabase);
+    await persistSession(sessionId, session, supabase, story);
     writer.write(`data: ${JSON.stringify({ type: 'chunk', text: closingMessage })}\n\n`);
     writer.write(`data: ${JSON.stringify({ type: 'done', message: closingMessage, done: true, remainingMs: 0 })}\n\n`);
     writer.end();
@@ -179,6 +388,7 @@ export async function handleUserMessageStream(
   }
 
   const elapsedMinutes = elapsed / 60000;
+  const transcript = storyTranscript(session, story);
 
   // Hand-back is driven from code, not from the prompt. COACH_SYSTEM_PROMPT already
   // says "Do NOT read back or recap the full STAR story", and the coach is handed the
@@ -191,8 +401,10 @@ export async function handleUserMessageStream(
   // The "already handed back" flag is DERIVED from the transcript rather than held in
   // memory. An in-memory flag wouldn't survive a cold Edge instance, and two instances
   // would each fire it once — the same failure shape as the session-cache data loss.
+  // It is checked over the whole STORY transcript, so it fires once per story, not
+  // once per sitting.
   const allGreen = STAR_KEYS.every(k => !!session.starSections[k]);
-  const alreadyHandedBack = session.conversationHistory.some(
+  const alreadyHandedBack = transcript.some(
     m => m.role === 'assistant' && m.content === HANDBACK_LINE
   );
 
@@ -202,7 +414,7 @@ export async function handleUserMessageStream(
     writer.write(`data: ${JSON.stringify({ type: 'chunk', text: coachResponse })}\n\n`);
   } else {
     coachResponse = await streamCoachResponse(
-      session.conversationHistory,
+      transcript,
       elapsedMinutes,
       sessionId,
       (chunk) => {
@@ -230,52 +442,27 @@ export async function handleUserMessageStream(
   })}\n\n`);
 
   // Persist after coach reply (fire-and-forget)
-  await persistSession(sessionId, session, supabase);
+  await persistSession(sessionId, session, supabase, story);
 
   // Run STAR extraction — must await so Vercel Edge doesn't terminate early
   const userMsgCount = session.conversationHistory.filter(m => m.role === 'user').length;
   if (userMsgCount >= 1) {
     try {
-      const sections = await extractStarSections(session.conversationHistory, sessionId, supabase);
+      const extractorInput = activeExperienceTurns(
+        storyTranscript(session, story),
+        story?.experienceSegments ?? []
+      );
+      const sections = await extractStarSections(extractorInput, sessionId, supabase);
       if (sections) {
-        const updates: { section: string; content: string }[] = [];
-        if (sections.question) {
-          session.extractedQuestion = sections.question;
-        }
-        // Captured once, then reused for the rest of the session by the coach and
-        // the summary — no re-scanning the transcript.
-        if (sections.targetCompany) {
-          session.targetCompany = sections.targetCompany;
-        }
-        if (sections.flags) {
-          session.extractedFlags = sections.flags;
-        }
-        for (const key of ['situation', 'task', 'action', 'result'] as const) {
-          if (sections[key] && sections[key] !== session.starSections[key]) {
-            // The extractor regenerates each section from scratch rather than editing
-            // it, so a fact captured earlier can silently vanish from a later version
-            // even though it's still in the transcript. That failure is invisible —
-            // the section still reads fine. Log dropped numbers (the highest-value and
-            // most detectable facts) so we can find out whether this actually happens
-            // before deciding whether it needs guarding. Diagnostic only: nothing
-            // branches on it.
-            const prev = session.starSections[key];
-            if (prev) {
-              const numbersIn = (t: string) => new Set(t.match(/\d[\d,.]*%?/g) ?? []);
-              const after = numbersIn(sections[key]!);
-              const dropped = [...numbersIn(prev)].filter(n => !after.has(n));
-              if (dropped.length) {
-                console.warn(
-                  `[section-drop] session=${sessionId} section=${key} dropped=${dropped.join('|')}`
-                );
-              }
-            }
-            session.starSections[key] = sections[key];
-            updates.push({ section: key, content: sections[key]! });
-          }
-        }
-        writer.write(`data: ${JSON.stringify({ type: 'star_update', updates, status: sections.status, question: sections.question || null, flags: sections.flags || null })}\n\n`);
-        await persistSession(sessionId, session, supabase);
+        const updates = applyExtraction(session, sections, sessionId);
+        writer.write(`data: ${JSON.stringify({
+          type: 'star_update',
+          updates,
+          status: sections.status,
+          question: session.extractedQuestion,
+          flags: sections.flags || null,
+        })}\n\n`);
+        await persistSession(sessionId, session, supabase, story);
       }
     } catch (err: any) {
       console.warn('STAR extraction failed:', err.message);
@@ -305,18 +492,16 @@ export async function endSession(sessionId: string, supabase: any) {
 export async function finalizeStarExtraction(sessionId: string, supabase: any) {
   const session = await loadSession(sessionId, supabase);
   if (!session) return null;
+  const story = await loadStory(session, supabase);
 
-  const sections = await extractStarSections(session.conversationHistory, sessionId, supabase);
+  const extractorInput = activeExperienceTurns(
+    storyTranscript(session, story),
+    story?.experienceSegments ?? []
+  );
+  const sections = await extractStarSections(extractorInput, sessionId, supabase);
   if (sections) {
-    if (sections.question) session.extractedQuestion = sections.question;
-    if (sections.flags) session.extractedFlags = sections.flags;
-    session.starSections = {
-      situation: sections.situation ?? null,
-      task: sections.task ?? null,
-      action: sections.action ?? null,
-      result: sections.result ?? null,
-    };
-    await persistSession(sessionId, session, supabase);
+    applyExtraction(session, sections, sessionId);
+    await persistSession(sessionId, session, supabase, story);
   }
   return sections;
 }
