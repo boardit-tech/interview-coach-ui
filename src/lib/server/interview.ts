@@ -545,6 +545,25 @@ export async function handleUserMessageStream(
   writer.end();
 }
 
+/**
+ * Everything the end-of-session assessment needs, read server-side. The client
+ * used to send its own copy of the transcript and sections; under resume that copy
+ * only covers the current sitting, and it was never something to trust anyway.
+ */
+export async function getStoryContext(sessionId: string, supabase: any) {
+  const session = await loadSession(sessionId, supabase);
+  if (!session) return null;
+  const story = await loadStory(session, supabase);
+  return {
+    storyId: session.storyId,
+    transcript: storyTranscript(session, story),
+    starSections: { ...session.starSections },
+    starStatus: { ...session.starStatus },
+    question: session.extractedQuestion,
+    targetCompany: session.targetCompany,
+  };
+}
+
 export async function endSession(sessionId: string, supabase: any) {
   const session = await loadSession(sessionId, supabase);
   if (!session) throw new Error('Session not found');
