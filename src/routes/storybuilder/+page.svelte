@@ -50,6 +50,7 @@
 		stopListening();
 		ttsStop();
 		stopHeartbeat();
+		stopIdleWatch();
 		if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
 		messages = messages.filter(m => !m.streaming);
 		superseded = true;
@@ -125,6 +126,59 @@
 	const UNFINISHED_TIMEOUT_MS = 4000; // sounds mid-sentence → send anyway rather than stall
 	const IDLE_CHECKIN_MS = 6000;      // nothing said at all → ask if they're still there
 	const MAX_CHECKINS_PER_TURN = 2;
+
+	// ── Idle close (decided 2026-09-07, timings confirmed 2026-09-08) ──
+	// 3 minutes with nothing from the user → the coach speaks IDLE_LINE and a card
+	// appears. The mic stays live: any speech dismisses the card and is a normal turn.
+	// 10 seconds after the line finishes with no response → the sitting ends through
+	// the normal finalize path and lands on the summary. Deferred while the coach is
+	// speaking or thinking. 3 minutes (not 4) keeps a returning user inside the
+	// prompt-cache TTL.
+	const IDLE_PROMPT_MS = 3 * 60 * 1000;
+	const IDLE_CLOSE_MS = 10 * 1000;
+	const IDLE_LINE = "Still with me? Take your time if you're thinking — or if now's not a good moment, we can wrap this sitting and pick it up later.";
+	let lastUserActivity = 0;
+	let idleCard = false;
+	let idleWatch: ReturnType<typeof setInterval> | null = null;
+	let idleCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function touchActivity() {
+		lastUserActivity = Date.now();
+		if (idleCard) dismissIdleCard();
+	}
+	function dismissIdleCard() {
+		idleCard = false;
+		if (idleCloseTimer) { clearTimeout(idleCloseTimer); idleCloseTimer = null; }
+	}
+	function handleStillHere() {
+		touchActivity();
+		if (!isSpeaking && !loading && !isListening && phase === 'coaching') startListening();
+	}
+	function startIdleWatch() {
+		stopIdleWatch();
+		lastUserActivity = Date.now();
+		idleWatch = setInterval(() => {
+			if (phase !== 'coaching' || sessionEnded || sessionExpired) return;
+			if (isSpeaking || loading) return;               // defer while the coach is busy
+			if (!idleCard) {
+				if (Date.now() - lastUserActivity >= IDLE_PROMPT_MS) {
+					idleCard = true;
+					ttsSpeak(IDLE_LINE);                          // mic restarts when TTS ends
+				}
+			} else if (!idleCloseTimer) {
+				// The line has finished (isSpeaking is false) — the 10s window starts now.
+				idleCloseTimer = setTimeout(() => {
+					if (!idleCard || sessionEnded) return;
+					dismissIdleCard();
+					handleEnd(true);
+				}, IDLE_CLOSE_MS);
+			}
+		}, 1000);
+	}
+	function stopIdleWatch() {
+		if (idleWatch) { clearInterval(idleWatch); idleWatch = null; }
+		dismissIdleCard();
+	}
 
 	// Trailing words that almost certainly mean the speaker is still going: hesitations,
 	// coordinating conjunctions, and articles/determiners.
@@ -214,6 +268,7 @@
 		// into the buffer, which meant a one-word answer could never be submitted.
 		if (transcript) {
 			checkinCount = 0;
+			touchActivity();
 			sendMessage(transcript);
 		}
 	}
@@ -225,15 +280,10 @@
 		if (checkinCount >= MAX_CHECKINS_PER_TURN) return;
 		if (isSpeaking || loading || sessionExpired) return;
 		checkinCount++;
-		// Second (final) nudge is deliberately a sign-off, not another question: it says
-		// the coach is done prompting, that the clock is still running, and that the user
-		// can simply resume. Going quiet without saying so leaves them wondering whether
-		// the session is still alive.
-		ttsSpeak(
-			checkinCount === 1
-				? 'Still with me?'
-				: "No rush — I'll be here until our time is up. Just start talking whenever you're ready."
-		);
+		// Two quick nudges, then quiet until the 3-minute idle prompt takes over. The
+		// old second line ("I'll be here until our time is up") promised something the
+		// idle close makes untrue.
+		ttsSpeak('Still with me?');
 	}
 
 	function startSilenceTimer() {
@@ -250,10 +300,9 @@
 				unfinishedTimer = setTimeout(endTurn, UNFINISHED_TIMEOUT_MS - SILENCE_TIMEOUT_MS);
 			} else if (checkinCount < MAX_CHECKINS_PER_TURN) {
 				// Nothing said at all — check in instead of sending an empty turn.
-				// After the cap, go quiet: the user may simply have stepped away, and
-				// the 20-minute timer already handles a genuinely abandoned session.
-				// Never auto-finish — they paid for this session, so ending it on their
-				// behalf would spend their credit on a decision they didn't make.
+				// After the cap, go quiet; the 3-minute idle watch (startIdleWatch)
+				// handles a genuinely absent user, and nothing is lost since the
+				// story is resumable.
 				// No re-arm here: speaking the check-in stops recognition, and the
 				// restart afterwards calls startListening(), which arms the timer again.
 				idleTimer = setTimeout(speakCheckIn, IDLE_CHECKIN_MS - SILENCE_TIMEOUT_MS);
@@ -282,6 +331,7 @@
 					interim += event.results[i][0].transcript;
 				}
 			}
+			if (final || interim) touchActivity();
 			if (final) { finalTranscriptBuf += final; startSilenceTimer(); }
 			if (interim) { clearSilenceTimer(); }
 			const display = finalTranscriptBuf + interim;
@@ -804,6 +854,7 @@
 			userConfirmedEnd = false;
 			superseded = false;
 			startHeartbeat();
+			startIdleWatch();
 			const cleanOpening = stripMarkdown(data.message);
 			messages = [{ role: 'interviewer', content: cleanOpening }];
 			phase = 'coaching';
@@ -922,6 +973,7 @@
 		userConfirmedEnd = true;
 		sessionEnded = true;
 		stopHeartbeat();
+		stopIdleWatch();
 		stopListening();
 		ttsStop();
 		if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
@@ -1142,6 +1194,7 @@
 		window.removeEventListener('mouseup', handleMouseUp);
 		document.removeEventListener('visibilitychange', handleVisibility);
 		stopHeartbeat();
+		stopIdleWatch();
 	});
 </script>
 
@@ -1451,6 +1504,12 @@
 		<div class="sb-coaching-main">
 			<!-- ══════ CALL VIEW ══════ -->
 				<div class="sb-call-view">
+					{#if idleCard && !superseded}
+						<div class="sb-idle-card" role="status">
+							<p>Still there? This sitting will wrap up on its own in a moment — your progress is saved either way.</p>
+							<button class="sb-start-btn" on:click={handleStillHere}>I'm still here</button>
+						</div>
+					{/if}
 					{#if superseded}
 						<div class="sb-overlay-card" role="status">
 							<h3>This story is open in another window</h3>
@@ -1739,6 +1798,25 @@
 		p { margin: 0 0 18px; color: #555; max-width: 420px; }
 	}
 	.sb-overlay-btn { text-decoration: none; display: inline-block; }
+	.sb-idle-card {
+		position: absolute;
+		left: 50%;
+		bottom: 24px;
+		transform: translateX(-50%);
+		z-index: 4;
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		padding: 14px 18px;
+		background: white;
+		border: 1px solid #f3d9c9;
+		border-radius: 14px;
+		box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+		max-width: min(560px, calc(100% - 32px));
+		p { margin: 0; font-size: 0.9rem; color: #444; }
+		.sb-start-btn { padding: 9px 20px; font-size: 0.9rem; white-space: nowrap; }
+		@media (max-width: 600px) { flex-direction: column; text-align: center; }
+	}
 	.sb-start-btn-secondary {
 		background: transparent;
 		color: #c96442;
