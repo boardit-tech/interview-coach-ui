@@ -27,8 +27,13 @@
 	// ── Story (the persistent object a session works on) ──
 	// storyId is what makes resume possible; it lives in the URL (?story=) so a
 	// refresh resumes instead of silently creating a new story.
+	export let data: { resumeStory: { id: string; status: 'in_progress' | 'complete'; question: string | null; green: number; updatedAt: string } | null };
+
 	let storyId: string | null = null;
 	let resumeStoryId: string | null = null;   // read from ?story= on load
+	let lockConflict = false;                  // another tab holds the story (409)
+	let superseded = false;                    // this tab lost the story to another
+	$: resumeStory = resumeStoryId && data?.resumeStory?.id === resumeStoryId ? data.resumeStory : null;
 	let storyStatus: 'in_progress' | 'complete' = 'in_progress';
 	let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -47,10 +52,8 @@
 		ttsStop();
 		stopHeartbeat();
 		if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-		messages = messages.filter(m => !m.streaming).concat([
-			{ role: 'system', content: 'This story was opened in another window, so this session has ended here. Your progress is saved.' }
-		]);
-		showToast('This story is now open in another window.', 'info', 8000);
+		messages = messages.filter(m => !m.streaming);
+		superseded = true;
 	}
 
 	async function sendHeartbeat() {
@@ -741,8 +744,9 @@
 	}
 
 	// ── Start session ──
-	async function handleStart() {
+	async function handleStart(takeover = false) {
 		loading = true;
+		lockConflict = false;
 		try {
 			// The start endpoint now handles the credit deduction atomically and
 			// server-side (subscribers are skipped). A session is only created if the
@@ -750,23 +754,17 @@
 			const startBody = (takeover: boolean) => JSON.stringify(
 				resumeStoryId ? { storyId: resumeStoryId, takeover } : {}
 			);
-			let interviewRes = await fetch('/storybuilder/api/start', {
+			const interviewRes = await fetch('/storybuilder/api/start', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: startBody(false),
+				body: startBody(takeover),
 			});
 
-			// Held by another live tab. Plain confirm for now; Phase 4 makes this a card.
+			// Held by another live tab. The lobby shows a card offering takeover.
 			if (interviewRes.status === 409) {
-				if (!confirm('This story is open in another window. Continue here instead?')) {
-					loading = false;
-					return;
-				}
-				interviewRes = await fetch('/storybuilder/api/start', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: startBody(true),
-				});
+				lockConflict = true;
+				loading = false;
+				return;
 			}
 
 			if (!interviewRes.ok) {
@@ -805,6 +803,7 @@
 			sessionEnded = false;
 			savedStoryId = null;
 			userConfirmedEnd = false;
+			superseded = false;
 			startHeartbeat();
 			const cleanOpening = stripMarkdown(data.message);
 			messages = [{ role: 'interviewer', content: cleanOpening }];
@@ -1259,6 +1258,38 @@
 					<p>Uh oh, looks like you're out of credits. Please buy more before continuing.</p>
 					<button class="sb-start-btn" on:click={() => goto('/credits')}>Buy Credits</button>
 				</div>
+			{:else if lockConflict}
+				<div class="sb-lobby-icon">&#x1F5D7;</div>
+				<h2>This story is open in another window</h2>
+				<p class="sb-lobby-note">Continue here instead? The other window will stop, and nothing is lost — every turn is saved as you go.</p>
+				<div class="sb-lobby-actions">
+					<button class="sb-start-btn" on:click={() => handleStart(true)} disabled={loading}>
+						{loading ? 'Starting...' : 'Continue here'}
+					</button>
+					<button class="sb-start-btn sb-start-btn-secondary" on:click={() => (lockConflict = false)}>Never mind</button>
+				</div>
+			{:else if resumeStory}
+				<div class="sb-lobby-icon">&#x1F501;</div>
+				<h1>{resumeStory.status === 'complete' ? 'Sharpen your story' : 'Pick up where you left off'}</h1>
+				<div class="sb-lobby-resume">
+					<span class="sb-lobby-resume-label">{resumeStory.status === 'complete' ? 'Complete' : `${resumeStory.green} of 4 sections solid`}</span>
+					<p class="sb-lobby-resume-q" class:untitled={!resumeStory.question}>
+						{resumeStory.question || 'Question not settled yet'}
+					</p>
+				</div>
+				<div class="sb-lobby-tips" style="margin-top: 0;">
+					<h3>Another focused 20 minutes</h3>
+					<p style="color: #555; font-size: 0.9rem; margin-bottom: 0;">
+						Your coach remembers everything from before and will {resumeStory.status === 'complete' ? 'follow your lead on what to tighten up' : 'pick up at the next section'}.
+						No credit is used to continue a story.
+					</p>
+				</div>
+				<div class="sb-lobby-actions">
+					<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
+						{loading ? 'Starting...' : resumeStory.status === 'complete' ? 'Sharpen this story' : 'Continue story'}
+					</button>
+					<button class="sb-start-btn sb-start-btn-secondary" on:click={handleBuildAnother}>Start a new story instead</button>
+				</div>
 			{:else}
 				<div class="sb-lobby-icon">&#10024;</div>
 				<h1>You are 20 minutes away from <span style="color: #c96442; font-weight: 700;">impressing your interviewer!</span></h1>
@@ -1286,7 +1317,7 @@
 						One credit will be deducted once you begin.
 					</p>
 				{/if}
-				<button class="sb-start-btn" on:click={handleStart} disabled={loading}>
+				<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
 					{loading ? 'Starting...' : 'Start Building'}
 				</button>
 			{/if}
@@ -1495,6 +1526,13 @@
 		<div class="sb-coaching-main">
 			<!-- ══════ CALL VIEW ══════ -->
 				<div class="sb-call-view">
+					{#if superseded}
+						<div class="sb-overlay-card" role="status">
+							<h3>This story is open in another window</h3>
+							<p>This session ended here so the two don't talk over each other. Everything you said is saved.</p>
+							<a href="/stories" class="sb-start-btn sb-overlay-btn">Back to my stories</a>
+						</div>
+					{/if}
 					<!-- Call status area -->
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -1736,6 +1774,46 @@
 	.sb-start-btn:hover { background: #b5593a; transform: translateY(-1px); }
 	.sb-start-btn:active { transform: translateY(0); }
 	.sb-start-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+	.sb-lobby-note { color: #555; font-size: 0.95rem; max-width: 420px; margin: 0 auto 20px; }
+	.sb-lobby-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+	.sb-lobby-resume {
+		background: white;
+		border: 1px solid #f3d9c9;
+		border-radius: 14px;
+		padding: 16px 20px;
+		margin: 12px auto 20px;
+		max-width: 520px;
+		text-align: left;
+	}
+	.sb-lobby-resume-label {
+		display: inline-block;
+		font-size: 0.68rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: #9a4a2e;
+		background: #fbe7dc;
+		border-radius: 10px;
+		padding: 2px 8px;
+		margin-bottom: 6px;
+	}
+	.sb-lobby-resume-q { margin: 0; font-weight: 600; color: #2d2d2d; }
+	.sb-lobby-resume-q.untitled { font-style: italic; color: #999; font-weight: 400; }
+	.sb-overlay-card {
+		position: absolute;
+		inset: 0;
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		padding: 32px;
+		background: rgba(250, 247, 242, 0.96);
+		h3 { margin: 0 0 8px; font-size: 1.15rem; color: #2d2d2d; }
+		p { margin: 0 0 18px; color: #555; max-width: 420px; }
+	}
+	.sb-overlay-btn { text-decoration: none; display: inline-block; }
 	.sb-start-btn-secondary {
 		background: transparent;
 		color: #c96442;
@@ -1808,6 +1886,7 @@
 
 	/* ── Call View (voice mode) ── */
 	.sb-call-view {
+		position: relative; /* anchors the superseded overlay card */
 		display: flex;
 		flex-direction: column;
 		height: 100%;
