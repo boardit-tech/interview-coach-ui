@@ -556,7 +556,10 @@ export async function getStoryContext(sessionId: string, supabase: any) {
   const story = await loadStory(session, supabase);
   return {
     storyId: session.storyId,
-    transcript: storyTranscript(session, story),
+    // Same view as the extractor: only the active experience. The summary is about
+    // THIS story, so an experience abandoned early must not leak into its talking
+    // points or cited strengths.
+    transcript: activeExperienceTurns(storyTranscript(session, story), story?.experienceSegments ?? []),
     starSections: { ...session.starSections },
     starStatus: { ...session.starStatus },
     question: session.extractedQuestion,
