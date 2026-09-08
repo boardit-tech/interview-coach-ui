@@ -1,9 +1,8 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
-	import { goto, beforeNavigate, invalidate } from '$app/navigation';
+	import { goto, invalidate } from '$app/navigation';
 	import { userStore } from '$lib/stores/userStore';
-	import { isRefundEligible } from '$lib/refund-policy';
 
 	// ── State ──
 	let phase: 'lobby' | 'coaching' | 'loading-report' | 'report' = 'lobby';
@@ -1117,91 +1116,18 @@
 	// ── Credits check ──
 	$: noCredits = $userStore.credits === 0 && !$userStore.subscriptionID && !loading;
 
-	function reportAbandon() {
-		if (!sessionId || sessionEnded || phase !== 'coaching') return;
-		const durationMs = startTimeMs ? Date.now() - startTimeMs : 0;
-		const starSectionsFilled = Object.values(starSections).filter(Boolean).length;
-		const payload = JSON.stringify({ sessionId, durationMs, starSectionsFilled });
-		navigator.sendBeacon('/storybuilder/api/abandon', new Blob([payload], { type: 'application/json' }));
-	}
-
-	// Hard browser unload (close tab, refresh, external link)
-	function handleBeforeUnload() {
-		reportAbandon();
-	}
-
-	// In-app SvelteKit navigation (e.g. clicking the logo back to Dashboard) —
-	// beforeunload does NOT fire for client-side route changes, so catch those here.
-	// Confirm first to prevent accidental loss of an active session, with a message
-	// that truthfully reflects the refund outcome (same threshold the server uses).
-	let leavingHandled = false;
-	beforeNavigate((nav) => {
-		// Set once we've confirmed and kicked off the abandon, so the follow-up
-		// goto() isn't intercepted and re-prompted.
-		if (leavingHandled) return;
-		if (!sessionId || sessionEnded || phase !== 'coaching') return;
-		const durationMs = startTimeMs ? Date.now() - startTimeMs : 0;
-		const sections = Object.values(starSections).filter(Boolean).length;
-		const subscriber = !!$userStore.subscriptionID;
-		const eligible = !subscriber && isRefundEligible(durationMs, sections);
-
-		// Progress is persisted per turn and the story is resumable, so leaving
-		// loses nothing. (The refund wording is gone; the legacy refund path itself
-		// is removed in Phase 5.)
-		let msg = 'Leave this sitting? Your progress is saved and you can come back to this story any time.';
-		void subscriber; void eligible;
-
-		if (!confirm(msg)) {
-			nav.cancel();
-			return;
-		}
-
-		// For an in-app navigation we can wait: cancel, finish the refund, then go.
-		// A fire-and-forget beacon would race the destination's server load, which
-		// reads the balance straight from the DB — so the next page could render a
-		// pre-refund number until a manual refresh.
-		const target = nav.to?.url;
-		if (target && nav.type !== 'leave') {
-			nav.cancel();
-			leavingHandled = true;
-			sessionEnded = true;
-			stopListening();
-			ttsStop();
-			finishAbandon(target.pathname + target.search);
-			return;
-		}
-
-		// Uncontrolled exit (tab close): can't await, fall back to the beacon.
-		reportAbandon();
-	});
-
-	// Report the abandon, wait for the refund to commit, then navigate — so the
-	// destination's load reads the updated balance.
-	async function finishAbandon(href: string) {
-		const durationMs = startTimeMs ? Date.now() - startTimeMs : 0;
-		const starSectionsFilled = Object.values(starSections).filter(Boolean).length;
-		try {
-			const res = await fetch('/storybuilder/api/abandon', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ sessionId, durationMs, starSectionsFilled }),
-			});
-			if (res.ok) {
-				const data = await res.json();
-				if (typeof data.credits === 'number') {
-					$userStore = { ...$userStore, credits: data.credits };
-				}
-			}
-		} catch { /* best effort — balance still settles on the next load */ }
-		await goto(href, { invalidateAll: true });
-	}
+	// The abandon beacon is gone (decided 2026-08-19). It never fired on crashes,
+	// OS kills, or dead batteries — exactly when it mattered — and everything it
+	// decided is now derived server-side: turns persist per turn, and a sitting that
+	// died without reporting is marked 'abandoned' when its story is next resumed.
+	// Leaving the page mid-session loses nothing; the story is resumable from the
+	// Story Bank or the ?story= URL.
 
 	onMount(() => {
 		const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 		browserSupported = !!SR;
 		window.addEventListener('mousemove', handleMouseMove);
 		window.addEventListener('mouseup', handleMouseUp);
-		window.addEventListener('beforeunload', handleBeforeUnload);
 		document.addEventListener('visibilitychange', handleVisibility);
 		resumeStoryId = new URLSearchParams(window.location.search).get('story');
 	});
@@ -1214,7 +1140,6 @@
 		if (timerInterval) clearInterval(timerInterval);
 		window.removeEventListener('mousemove', handleMouseMove);
 		window.removeEventListener('mouseup', handleMouseUp);
-		window.removeEventListener('beforeunload', handleBeforeUnload);
 		document.removeEventListener('visibilitychange', handleVisibility);
 		stopHeartbeat();
 	});
