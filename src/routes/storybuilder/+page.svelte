@@ -23,6 +23,59 @@
 	let starStatus: Record<string, 'green' | 'yellow' | null> = { situation: null, task: null, action: null, result: null };
 	let extractedQuestion: string | null = null;
 	let extractedFlags: Array<{ flag: string; suggestion: string }> | null = null;
+
+	// ── Story (the persistent object a session works on) ──
+	// storyId is what makes resume possible; it lives in the URL (?story=) so a
+	// refresh resumes instead of silently creating a new story.
+	let storyId: string | null = null;
+	let resumeStoryId: string | null = null;   // read from ?story= on load
+	let storyStatus: 'in_progress' | 'complete' = 'in_progress';
+	let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
+	function setStoryInUrl(id: string | null) {
+		if (!browser) return;
+		const url = new URL(window.location.href);
+		if (id) url.searchParams.set('story', id); else url.searchParams.delete('story');
+		history.replaceState(history.state, '', url.toString());
+	}
+
+	// Another tab took this story over. Quiet exit: no dialog, no TTS.
+	function handleSuperseded() {
+		if (sessionEnded) return;
+		sessionEnded = true;
+		stopListening();
+		ttsStop();
+		stopHeartbeat();
+		if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+		messages = messages.filter(m => !m.streaming).concat([
+			{ role: 'system', content: 'This story was opened in another window, so this session has ended here. Your progress is saved.' }
+		]);
+		showToast('This story is now open in another window.', 'info', 8000);
+	}
+
+	async function sendHeartbeat() {
+		if (!sessionId || !storyId || sessionEnded || phase !== 'coaching') return;
+		try {
+			const res = await fetch('/storybuilder/api/heartbeat', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ sessionId, storyId }),
+			});
+			if (!res.ok) return;
+			const data = await res.json();
+			if (data.replaced) handleSuperseded();
+		} catch { /* transient — next beat will tell */ }
+	}
+	function startHeartbeat() {
+		stopHeartbeat();
+		heartbeatInterval = setInterval(sendHeartbeat, 30_000);
+	}
+	function stopHeartbeat() {
+		if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
+	}
+	function handleVisibility() {
+		if (document.visibilityState === 'visible') sendHeartbeat();
+	}
 	// Grounded end-of-session summary (per-section talking points + strong/missing,
 	// cited strengths/growth, full story only when all green).
 	let assessment: any = null;
@@ -644,6 +697,8 @@
 							for (const update of event.updates) {
 								starSections = { ...starSections, [update.section]: update.content };
 							}
+						} else if (event.type === 'superseded') {
+							handleSuperseded();
 						} else if (event.type === 'error') {
 							messages = messages.filter(m => !m.streaming).concat([
 								{ role: 'system', content: `Error: ${event.error}` }
@@ -656,8 +711,16 @@
 			// After stream closes, handle session-ending if needed
 			if (finalData?.done) {
 				stopListening();
-				ttsStop();
-				await handleEnd(true);
+				if (finalData.reason === 'off_topic' || finalData.reason === 'switch') {
+					// The coach's closing line is the explanation — let it be heard,
+					// then end. (The 20-min path stops TTS because the client already
+					// spoke its own time-up line.)
+					sessionExpired = true;
+					if (isSpeaking) pendingAutoEnd = true; else await handleEnd(true);
+				} else {
+					ttsStop();
+					await handleEnd(true);
+				}
 			}
 		} catch {
 			messages = messages.filter(m => !m.streaming).concat([
@@ -684,12 +747,36 @@
 			// The start endpoint now handles the credit deduction atomically and
 			// server-side (subscribers are skipped). A session is only created if the
 			// deduction committed, so there's no client-side deduct/refund dance.
-			const interviewRes = await fetch('/storybuilder/api/start', { method: 'POST' });
+			const startBody = (takeover: boolean) => JSON.stringify(
+				resumeStoryId ? { storyId: resumeStoryId, takeover } : {}
+			);
+			let interviewRes = await fetch('/storybuilder/api/start', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: startBody(false),
+			});
+
+			// Held by another live tab. Plain confirm for now; Phase 4 makes this a card.
+			if (interviewRes.status === 409) {
+				if (!confirm('This story is open in another window. Continue here instead?')) {
+					loading = false;
+					return;
+				}
+				interviewRes = await fetch('/storybuilder/api/start', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: startBody(true),
+				});
+			}
 
 			if (!interviewRes.ok) {
 				let errCode = '';
 				try { errCode = (await interviewRes.json()).error; } catch {}
-				if (interviewRes.status === 402 || errCode === 'no_credits') {
+				if (interviewRes.status === 404 || errCode === 'story_not_found') {
+					showToast("We couldn't find that story. Starting fresh instead.", 'error', 8000);
+					resumeStoryId = null;
+					setStoryInUrl(null);
+				} else if (interviewRes.status === 402 || errCode === 'no_credits') {
 					showToast("You're out of credits — grab more to start a session.", 'error', 8000);
 				} else if (interviewRes.status === 503 || errCode === 'billing_unavailable') {
 					showToast("We couldn't verify your plan just now — no credit was used. Please try again.", 'error', 8000);
@@ -706,11 +793,19 @@
 				$userStore = { ...$userStore, credits: data.credits };
 			}
 			sessionId = data.sessionId;
+			storyId = data.storyId ?? null;
+			storyStatus = data.storyStatus ?? 'in_progress';
+			setStoryInUrl(storyId);
 			startTimeMs = Date.now();
 			remainingTime = 20 * 60 * 1000;
-			starSections = { situation: null, task: null, action: null, result: null } as Record<string, string | null>;
-			starStatus = { situation: null, task: null, action: null, result: null };
+			// Resumed: fill the sidebar from stored state before the first turn.
+			starSections = { situation: null, task: null, action: null, result: null, ...(data.starSections ?? {}) } as Record<string, string | null>;
+			starStatus = { situation: null, task: null, action: null, result: null, ...(data.starStatus ?? {}) };
+			extractedQuestion = data.question ?? null;
+			sessionEnded = false;
+			savedStoryId = null;
 			userConfirmedEnd = false;
+			startHeartbeat();
 			const cleanOpening = stripMarkdown(data.message);
 			messages = [{ role: 'interviewer', content: cleanOpening }];
 			phase = 'coaching';
@@ -822,14 +917,12 @@
 	async function handleEnd(auto = false) {
 		if (!auto) {
 			// Subscribers aren't charged per session — don't mention credits to them.
-			const msg = $userStore.subscriptionID
-				? "Are you sure you want to finish? You won't be able to return to this session."
-				: "Are you sure you want to finish? You won't be able to return to this session and the session credit will be used.";
-			if (!confirm(msg)) return;
+			if (!confirm('Finish this sitting? You can come back to this story any time.')) return;
 		}
 
 		userConfirmedEnd = true;
 		sessionEnded = true;
+		stopHeartbeat();
 		stopListening();
 		ttsStop();
 		if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
@@ -927,6 +1020,9 @@
 		phase = 'lobby';
 		messages = [];
 		sessionId = null;
+		storyId = null;
+		resumeStoryId = null;
+		setStoryInUrl(null);
 		report = null;
 		assessment = null;
 		userConfirmedEnd = false;
@@ -1028,14 +1124,11 @@
 		const subscriber = !!$userStore.subscriptionID;
 		const eligible = !subscriber && isRefundEligible(durationMs, sections);
 
-		let msg: string;
-		if (subscriber) {
-			msg = 'Leave this session? Your in-progress story will be discarded.';
-		} else if (eligible) {
-			msg = "Leave now? Since you're just getting started, your credit will be refunded.";
-		} else {
-			msg = 'Leave now? Your credit will be used and this in-progress story will be discarded.';
-		}
+		// Progress is persisted per turn and the story is resumable, so leaving
+		// loses nothing. (The refund wording is gone; the legacy refund path itself
+		// is removed in Phase 5.)
+		let msg = 'Leave this sitting? Your progress is saved and you can come back to this story any time.';
+		void subscriber; void eligible;
 
 		if (!confirm(msg)) {
 			nav.cancel();
@@ -1088,6 +1181,8 @@
 		window.addEventListener('mousemove', handleMouseMove);
 		window.addEventListener('mouseup', handleMouseUp);
 		window.addEventListener('beforeunload', handleBeforeUnload);
+		document.addEventListener('visibilitychange', handleVisibility);
+		resumeStoryId = new URLSearchParams(window.location.search).get('story');
 	});
 
 	onDestroy(() => {
@@ -1099,6 +1194,8 @@
 		window.removeEventListener('mousemove', handleMouseMove);
 		window.removeEventListener('mouseup', handleMouseUp);
 		window.removeEventListener('beforeunload', handleBeforeUnload);
+		document.removeEventListener('visibilitychange', handleVisibility);
+		stopHeartbeat();
 	});
 </script>
 
