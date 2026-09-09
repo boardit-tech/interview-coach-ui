@@ -111,3 +111,63 @@ export async function decideResume(
   }
   return { ok: true, expiresAt: p.expires_at, inGrace: now >= expires };
 }
+
+// ── Read-only summaries for the UI ──────────────────────────────────────────
+
+export interface PlanSummary {
+  storiesLeft: number;          // unspent allowance across live unbound purchases
+  poolExpiresAt: string | null; // when the soonest live purchase with room ends
+  hasAnyPurchase: boolean;
+  allExpired: boolean;          // had purchases, none live
+}
+
+export async function getPlanSummary(supabase: any): Promise<PlanSummary> {
+  const { data: purchases } = await supabase
+    .from('purchases')
+    .select('id, stories_allowed, expires_at, revoked_at, for_story_id')
+    .is('revoked_at', null)
+    .order('expires_at', { ascending: true });
+  const all = purchases ?? [];
+  if (all.length === 0) return { storiesLeft: 0, poolExpiresAt: null, hasAnyPurchase: false, allExpired: false };
+
+  const { data: used } = await supabase.from('story_consumptions').select('purchase_id');
+  const usedCount = new Map<string, number>();
+  for (const c of used ?? []) usedCount.set(c.purchase_id, (usedCount.get(c.purchase_id) ?? 0) + 1);
+
+  const now = Date.now();
+  let storiesLeft = 0;
+  let poolExpiresAt: string | null = null;
+  let anyLive = false;
+  for (const p of all) {
+    if (new Date(p.expires_at).getTime() <= now) continue;
+    anyLive = true;
+    if (p.for_story_id) continue;
+    const room = p.stories_allowed - (usedCount.get(p.id) ?? 0);
+    if (room > 0) {
+      storiesLeft += room;
+      if (!poolExpiresAt) poolExpiresAt = p.expires_at;
+    }
+  }
+  return { storiesLeft, poolExpiresAt, hasAnyPurchase: true, allExpired: !anyLive };
+}
+
+/** For a list of stories, which are past their window (and the grace hour). */
+export async function storyExpiries(
+  supabase: any,
+  stories: Array<{ id: string; purchase_id: string | null; status: string }>
+): Promise<Map<string, { expiresAt: string; expired: boolean }>> {
+  const ids = [...new Set(stories.map(s => s.purchase_id).filter(Boolean))] as string[];
+  const out = new Map<string, { expiresAt: string; expired: boolean }>();
+  if (ids.length === 0) return out;
+  const { data: purchases } = await supabase
+    .from('purchases').select('id, expires_at, revoked_at').in('id', ids);
+  const byId = new Map<string, any>((purchases ?? []).map((p: any) => [p.id, p]));
+  const now = Date.now();
+  for (const s of stories) {
+    const p = s.purchase_id ? byId.get(s.purchase_id) : null;
+    if (!p) continue;
+    const t = new Date(p.expires_at).getTime();
+    out.set(s.id, { expiresAt: p.expires_at, expired: !!p.revoked_at || now >= t + GRACE_MS });
+  }
+  return out;
+}

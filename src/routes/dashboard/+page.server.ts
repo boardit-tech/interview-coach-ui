@@ -1,4 +1,5 @@
 import type { PageServerLoad } from './$types';
+import { getPlanSummary, storyExpiries } from '$lib/server/entitlement';
 
 export const load: PageServerLoad = async ({ locals, parent, depends }) => {
     // Lets the summary page call invalidate('app:stories') so a newly saved story
@@ -16,7 +17,7 @@ export const load: PageServerLoad = async ({ locals, parent, depends }) => {
     // Fetch recent stories (last 3)
     const { data: recentStories } = await locals.supabase
         .from('stories')
-        .select('id, question, created_at, tier, status, extracted_question, star_sections, updated_at')
+        .select('id, question, created_at, tier, status, extracted_question, star_sections, updated_at, purchase_id')
         .eq('user_id', userId)
         .order('updated_at', { ascending: false })
         .limit(3);
@@ -41,8 +42,16 @@ export const load: PageServerLoad = async ({ locals, parent, depends }) => {
         .order('created_at', { ascending: false })
         .limit(10);
 
+    const plan = await getPlanSummary(locals.supabase);
+    const expiries = await storyExpiries(locals.supabase, recentStories || []);
+    const storiesWithExpiry = (recentStories || []).map((s: any) => ({
+        ...s,
+        expired: expiries.get(s.id)?.expired ?? false,
+    }));
+
     return {
-        recentStories: recentStories || [],
+        plan,
+        recentStories: storiesWithExpiry,
         totalStories: totalStories || 0,
         totalSessions: totalSessions || 0,
         recentSessions: recentSessions || [],

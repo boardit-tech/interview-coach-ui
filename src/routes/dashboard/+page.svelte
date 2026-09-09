@@ -8,6 +8,8 @@
 	$: recentStories = data.recentStories || [];
 	$: totalStories = data.totalStories || 0;
 	$: recentSessions = data.recentSessions || [];
+	$: plan = data.plan;
+	$: storiesLeft = plan?.storiesLeft ?? 0;
 
 	const formatDate = (dateStr: string) => {
 		const d = new Date(dateStr);
@@ -99,26 +101,18 @@
 						<span class="dash-stat-label">{totalStories === 1 ? 'Story' : 'Stories'} Built</span>
 					</div>
 					<div class="dash-stat">
-						{#if $userStore.subscriptionID}
-							<span class="dash-stat-value">Unlimited credits</span>
-							<span class="dash-stat-label">Subscription Active</span>
-						{:else}
-							<span class="dash-stat-value">{$userStore.credits}</span>
-							<span class="dash-stat-label">Credit{$userStore.credits !== 1 ? 's' : ''} Left</span>
-						{/if}
+						<span class="dash-stat-value">{recentStories.filter(s => s.status === 'in_progress').length}</span>
+						<span class="dash-stat-label">In Progress</span>
 					</div>
 				</div>
-				{#if $userStore.subscriptionID && $userStore.credits > 0}
-					<span class="dash-credits-note">Your subscription is used first. Your {$userStore.credits} purchased credit{$userStore.credits !== 1 ? 's' : ''} will kick in if it ends.</span>
+				{#if !$userStore.subscriptionID && storiesLeft > 0 && storiesLeft <= 3}
+					<!-- Only at 3 or fewer — a ticking counter makes people ration. -->
+					<span class="dash-credits-note dash-left-note">{storiesLeft} {storiesLeft === 1 ? 'story' : 'stories'} left on your plan</span>
+				{:else if !$userStore.subscriptionID && $userStore.credits > 0 && storiesLeft === 0}
+					<span class="dash-credits-note">{$userStore.credits} session credit{$userStore.credits !== 1 ? 's' : ''} — each one starts a story.</span>
 				{/if}
 				<div class="dash-card-actions">
-					{#if $userStore.subscriptionID}
-						<a href="/credits" class="dash-action-link">Manage Subscription</a>
-					{:else}
-						<a href="/credits" class="dash-action-link">Buy More Credits</a>
-						<span class="dash-action-divider">·</span>
-						<a href="/credits" class="dash-action-link">Subscribe</a>
-					{/if}
+					<a href="/credits" class="dash-action-link">Your plan</a>
 					<span class="dash-action-divider">·</span>
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -143,8 +137,11 @@
 						{@const inProgress = story.status === 'in_progress'}
 						{@const title = story.question || story.extracted_question}
 						{@const green = ['situation', 'task', 'action', 'result'].filter(k => !!story.star_sections?.[k]).length}
-						<a href={inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:incomplete={!inProgress && story.tier === 'partial'} class:inprogress={inProgress}>
-							{#if inProgress}
+						{@const expired = inProgress && story.expired}
+						<a href={expired ? `/credits?finish=${story.id}` : inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:incomplete={!inProgress && story.tier === 'partial'} class:inprogress={inProgress} class:expired={expired}>
+							{#if expired}
+								<span class="dash-story-badge">Window ended · {green}/4</span>
+							{:else if inProgress}
 								<span class="dash-story-badge dash-badge-progress">In progress · {green}/4</span>
 							{:else if story.tier === 'partial'}
 								<span class="dash-story-badge">Incomplete</span>
@@ -152,7 +149,7 @@
 							<span class="dash-story-title" class:untitled={!title}>
 								{title || (inProgress ? 'Untitled story' : 'Undefined interview question')}
 							</span>
-							<span class="dash-story-date">{inProgress ? 'Continue →' : formatDate(story.created_at)}</span>
+							<span class="dash-story-date">{expired ? 'Finish for $6 →' : inProgress ? 'Continue →' : formatDate(story.created_at)}</span>
 						</a>
 					{/each}
 				</div>
@@ -433,6 +430,11 @@
 	.dash-story-card.inprogress {
 		border: 1px solid #f3d9c9;
 	}
+	.dash-story-card.expired {
+		border: 1px dashed #f0b8b2;
+		background: #fdeceb;
+	}
+	.dash-left-note { color: #8a5a00; background: #fff6e5; border-radius: 8px; padding: 6px 10px; display: inline-block; }
 	.dash-badge-progress {
 		color: #9a4a2e !important;
 		background: #fbe7dc !important;

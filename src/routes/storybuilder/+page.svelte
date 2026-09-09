@@ -26,7 +26,22 @@
 	// ── Story (the persistent object a session works on) ──
 	// storyId is what makes resume possible; it lives in the URL (?story=) so a
 	// refresh resumes instead of silently creating a new story.
-	export let data: { resumeStory: { id: string; status: 'in_progress' | 'complete'; question: string | null; green: number; updatedAt: string } | null };
+	export let data: {
+		resumeStory: { id: string; status: 'in_progress' | 'complete'; question: string | null; green: number; updatedAt: string; expiresAt: string | null; expired: boolean } | null;
+		plan: { storiesLeft: number; poolExpiresAt: string | null; hasAnyPurchase: boolean; allExpired: boolean } | null;
+		credits: number;
+	};
+	// Why a NEW story can't start, if it can't. Pre-computed from the plan on load
+	// and refreshed from the server's answer on a refused start.
+	let blockedReason: 'no_stories' | 'window_ended' | 'no_purchase' | null = null;
+	$: if (data?.plan && !$userStore.subscriptionID && data.plan.storiesLeft === 0 && (data.credits ?? 0) === 0) {
+		blockedReason = data.plan.allExpired ? 'window_ended' : data.plan.hasAnyPurchase ? 'no_stories' : 'no_purchase';
+	}
+	const fmtDay = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+	const daysUntil = (iso: string) => Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+	// The window that governs THIS action: the story's own when resuming, the pool's when starting.
+	$: governingExpiry = resumeStory ? resumeStory.expiresAt : data?.plan?.poolExpiresAt ?? null;
+	$: windowEndsSoon = governingExpiry && daysUntil(governingExpiry) <= 7 && daysUntil(governingExpiry) >= 0 ? governingExpiry : null;
 
 	let storyId: string | null = null;
 	let resumeStoryId: string | null = null;   // read from ?story= on load
@@ -823,8 +838,13 @@
 					showToast("We couldn't find that story. Starting fresh instead.", 'error', 8000);
 					resumeStoryId = null;
 					setStoryInUrl(null);
+				} else if (errCode === 'story_expired') {
+					// Window closed past the grace hour — the lobby shows the $6 reopen.
+					if (resumeStory) resumeStory = { ...resumeStory, expired: true };
+				} else if (errCode === 'no_stories' || errCode === 'window_ended' || errCode === 'no_purchase') {
+					blockedReason = errCode;
 				} else if (interviewRes.status === 402 || errCode === 'no_credits') {
-					showToast("You're out of credits — grab more to start a session.", 'error', 8000);
+					blockedReason = 'no_purchase';
 				} else if (interviewRes.status === 503 || errCode === 'billing_unavailable') {
 					showToast("We couldn't verify your plan just now — no credit was used. Please try again.", 'error', 8000);
 				} else {
@@ -1165,8 +1185,6 @@
 		{ key: 'result', label: 'Result' }
 	];
 
-	// ── Credits check ──
-	$: noCredits = $userStore.credits === 0 && !$userStore.subscriptionID && !loading;
 
 	// The abandon beacon is gone (decided 2026-08-19). It never fired on crashes,
 	// OS kills, or dead batteries — exactly when it mattered — and everything it
@@ -1231,10 +1249,37 @@
 	</div>
 	<div class="sb-container">
 		<div class="sb-lobby">
-			{#if noCredits}
-				<div class="sb-no-credits">
-					<p>Uh oh, looks like you're out of credits. Please buy more before continuing.</p>
-					<button class="sb-start-btn" on:click={() => goto('/credits')}>Buy Credits</button>
+			{#if resumeStory?.expired}
+				<div class="sb-lobby-icon">&#x23F3;</div>
+				<h1>This story's build window has ended</h1>
+				<div class="sb-lobby-resume">
+					<span class="sb-lobby-resume-label">{resumeStory.status === 'complete' ? 'Complete' : `${resumeStory.green} of 4 sections solid`}</span>
+					<p class="sb-lobby-resume-q" class:untitled={!resumeStory.question}>
+						{resumeStory.question || 'Question not settled yet'}
+					</p>
+				</div>
+				<p class="sb-lobby-note">
+					Everything you built is saved and yours to keep. To keep working on it, reopen it for another 30 days.
+				</p>
+				<div class="sb-lobby-actions">
+					<a href="/credits?finish={resumeStory.id}" class="sb-start-btn sb-overlay-btn">Finish this story for $6</a>
+					<a href="/stories" class="sb-start-btn sb-start-btn-secondary sb-overlay-btn">Back to my stories</a>
+				</div>
+			{:else if blockedReason && !resumeStory}
+				<div class="sb-lobby-icon">&#x1F4DA;</div>
+				{#if blockedReason === 'no_stories'}
+					<h1>You've used every story in your bundle</h1>
+					<p class="sb-lobby-note">Nice work. Get another 15 to keep building, or add a single story.</p>
+				{:else if blockedReason === 'window_ended'}
+					<h1>Your build window has ended</h1>
+					<p class="sb-lobby-note">Your stories are yours to keep. To build more, start a new bundle or add a single story.</p>
+				{:else}
+					<h1>Start your first interview-ready story</h1>
+					<p class="sb-lobby-note">Pick a plan and your coach will take it from there.</p>
+				{/if}
+				<div class="sb-lobby-actions">
+					<a href="/credits" class="sb-start-btn sb-overlay-btn">See plans</a>
+					<a href="/stories" class="sb-start-btn sb-start-btn-secondary sb-overlay-btn">My Story Bank</a>
 				</div>
 			{:else if lockConflict}
 				<div class="sb-lobby-icon">&#x1F5D7;</div>
@@ -1262,6 +1307,9 @@
 						No credit is used to continue a story.
 					</p>
 				</div>
+				{#if windowEndsSoon}
+					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon)}.</p>
+				{/if}
 				<div class="sb-lobby-actions">
 					<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
 						{loading ? 'Starting...' : resumeStory.status === 'complete' ? 'Sharpen this story' : 'Continue story'}
@@ -1290,10 +1338,13 @@
 						You can click on the text wall to interrupt at any time.
 					</p>
 				</div>
-				{#if !$userStore.subscriptionID}
-					<p style="text-align: center; color: #888; font-size: 0.85rem;">
-						One credit will be deducted once you begin.
-					</p>
+				{#if windowEndsSoon}
+					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon)}.</p>
+				{/if}
+				{#if !$userStore.subscriptionID && data?.plan && data.plan.storiesLeft > 0 && data.plan.storiesLeft <= 3}
+					<p class="sb-lobby-left">{data.plan.storiesLeft} {data.plan.storiesLeft === 1 ? 'story' : 'stories'} left on your plan</p>
+				{:else if !$userStore.subscriptionID && data?.plan?.storiesLeft === 0 && (data?.credits ?? 0) > 0}
+					<p class="sb-lobby-left">One credit starts this story.</p>
 				{/if}
 				<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
 					{loading ? 'Starting...' : 'Start Building'}
@@ -1759,6 +1810,16 @@
 	.sb-start-btn:active { transform: translateY(0); }
 	.sb-start-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 	.sb-lobby-note { color: #555; font-size: 0.95rem; max-width: 420px; margin: 0 auto 20px; }
+	.sb-lobby-window {
+		display: inline-block;
+		background: #fff6e5;
+		color: #8a5a00;
+		border-radius: 10px;
+		padding: 6px 12px;
+		font-size: 0.85rem;
+		margin: 0 0 12px;
+	}
+	.sb-lobby-left { color: #888; font-size: 0.85rem; text-align: center; margin: 0 0 8px; }
 	.sb-lobby-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 	.sb-lobby-resume {
 		background: white;

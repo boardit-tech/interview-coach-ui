@@ -1,4 +1,5 @@
 import type { PageServerLoad } from './$types';
+import { storyExpiries } from '$lib/server/entitlement';
 
 export const load: PageServerLoad = async ({ locals, depends }) => {
     depends('app:stories');
@@ -10,7 +11,7 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 
     const { data: stories, error } = await locals.supabase
         .from('stories')
-        .select('id, question, full_story, talking_points, strength_signals, flags, created_at, tier, status, extracted_question, star_sections, star_status, updated_at')
+        .select('id, question, full_story, talking_points, strength_signals, flags, created_at, tier, status, extracted_question, star_sections, star_status, updated_at, purchase_id')
         .eq('user_id', session.user.id)
         .order('updated_at', { ascending: false });
 
@@ -19,5 +20,8 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
         return { stories: [] };
     }
 
-    return { stories: stories || [] };
+    const expiries = await storyExpiries(locals.supabase, stories || []);
+    return {
+        stories: (stories || []).map((s: any) => ({ ...s, expired: expiries.get(s.id)?.expired ?? false })),
+    };
 };

@@ -1,31 +1,42 @@
 import type { PageServerLoad } from './$types';
+import { getPlanSummary, storyExpiries } from '$lib/server/entitlement';
 
-// When the page opens with ?story=, the lobby shows what's about to be resumed
-// (question, progress) before the mic turns on. RLS scopes the read to the
-// user's own stories; a foreign or missing id simply yields null and the lobby
-// falls back to a fresh start.
+// The lobby needs two things before the mic turns on: what's about to be resumed
+// (question, progress, whether its window has closed), and whether a NEW story
+// can be started at all (stories left, when the window ends). RLS scopes every
+// read to the user's own rows.
 export const load: PageServerLoad = async ({ locals, url }) => {
-  const storyId = url.searchParams.get('story');
-  if (!storyId) return { resumeStory: null };
-
   const session = await locals.getSession();
-  if (!session) return { resumeStory: null };
+  if (!session) return { resumeStory: null, plan: null, credits: 0 };
 
-  const { data } = await locals.supabase
-    .from('stories')
-    .select('id, status, question, extracted_question, star_sections, updated_at')
-    .eq('id', storyId)
-    .single();
-  if (!data) return { resumeStory: null };
+  const storyId = url.searchParams.get('story');
 
-  const green = ['situation', 'task', 'action', 'result'].filter(k => !!data.star_sections?.[k]).length;
-  return {
-    resumeStory: {
+  const [plan, { data: profile }, storyRes] = await Promise.all([
+    getPlanSummary(locals.supabase),
+    locals.supabase.from('profiles').select('credits').eq('id', session.user.id).single(),
+    storyId
+      ? locals.supabase
+          .from('stories')
+          .select('id, status, question, extracted_question, star_sections, updated_at, purchase_id')
+          .eq('id', storyId)
+          .single()
+      : Promise.resolve({ data: null }),
+  ]);
+
+  let resumeStory = null;
+  const data = storyRes.data;
+  if (data) {
+    const exp = (await storyExpiries(locals.supabase, [data])).get(data.id) ?? null;
+    resumeStory = {
       id: data.id,
       status: data.status as 'in_progress' | 'complete',
       question: data.question || data.extracted_question || null,
-      green,
+      green: ['situation', 'task', 'action', 'result'].filter(k => !!data.star_sections?.[k]).length,
       updatedAt: data.updated_at,
-    },
-  };
+      expiresAt: exp?.expiresAt ?? null,
+      expired: exp?.expired ?? false,
+    };
+  }
+
+  return { resumeStory, plan, credits: profile?.credits ?? 0 };
 };

@@ -66,9 +66,7 @@
 						<div class="nav-dropdown">
 							<div class="nav-dropdown-header">
 								<span class="nav-dropdown-name">{username}</span>
-								{#if !$userStore.subscriptionID && $userStore.credits > 0}
-									<span class="nav-dropdown-credits">{$userStore.credits} credit{$userStore.credits !== 1 ? 's' : ''} remaining</span>
-								{/if}
+								<a href="/credits" class="nav-dropdown-credits" on:click={() => isUserMenuOpen = false}>Your plan</a>
 							</div>
 							<div class="nav-dropdown-divider"></div>
 							<a href="/logout" data-sveltekit-reload on:click={() => isUserMenuOpen = false}>Log Out</a>

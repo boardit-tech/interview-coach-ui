@@ -114,7 +114,10 @@
 								<h3 class:untitled={!titleOf(story)}>{titleOf(story) || (inProgress(story) ? 'Untitled story — question not settled yet' : 'Undefined interview question')}</h3>
 							</div>
 							<div class="sb-story-meta">
-								{#if inProgress(story)}
+								{#if inProgress(story) && story.expired}
+									<span class="sb-story-date">window ended</span>
+									<button class="sb-continue-btn" on:click|stopPropagation={() => goto(`/credits?finish=${story.id}`)}>Finish for $6</button>
+								{:else if inProgress(story)}
 									<span class="sb-story-date">last worked on {lastActive(story)}</span>
 									<button class="sb-continue-btn" on:click|stopPropagation={() => resume(story)}>Continue</button>
 								{:else}
