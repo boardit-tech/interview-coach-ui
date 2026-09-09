@@ -22,6 +22,6 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 
     const expiries = await storyExpiries(locals.supabase, stories || []);
     return {
-        stories: (stories || []).map((s: any) => ({ ...s, expired: expiries.get(s.id)?.expired ?? false })),
+        stories: (stories || []).map((s: any) => ({ ...s, expired: expiries.get(s.id)?.expired ?? false, expiresAt: expiries.get(s.id)?.expiresAt ?? null })),
     };
 };

@@ -86,7 +86,7 @@
 			<!-- CTA card -->
 			<div class="dash-card dash-cta-card">
 				<h2>Build a new story</h2>
-				<p>20 minutes with your AI coach to turn a real experience into a remarkable story that interviewers remember.</p>
+				<p>Turn a real experience into a story interviewers remember. Focused 20-minute sittings with your AI coach, as many as the story needs.</p>
 				<button class="dash-cta-btn" on:click={() => goto('/storybuilder')}>
 					Start Building
 				</button>
@@ -137,10 +137,10 @@
 						{@const inProgress = story.status === 'in_progress'}
 						{@const title = story.question || story.extracted_question}
 						{@const green = ['situation', 'task', 'action', 'result'].filter(k => !!story.star_sections?.[k]).length}
-						{@const expired = inProgress && story.expired}
-						<a href={expired ? `/credits?finish=${story.id}` : inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:incomplete={!inProgress && story.tier === 'partial'} class:inprogress={inProgress} class:expired={expired}>
+						{@const expired = !!story.expired}
+						<a href={expired ? `/credits?finish=${story.id}` : inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:inprogress={inProgress && !expired} class:expired={expired}>
 							{#if expired}
-								<span class="dash-story-badge">Window ended · {green}/4</span>
+								<span class="dash-story-badge">Window ended{inProgress ? ` · ${green}/4` : ''}</span>
 							{:else if inProgress}
 								<span class="dash-story-badge dash-badge-progress">In progress · {green}/4</span>
 							{:else if story.tier === 'partial'}
@@ -149,7 +149,7 @@
 							<span class="dash-story-title" class:untitled={!title}>
 								{title || (inProgress ? 'Untitled story' : 'Undefined interview question')}
 							</span>
-							<span class="dash-story-date">{expired ? 'Finish for $6 →' : inProgress ? 'Continue →' : formatDate(story.created_at)}</span>
+							<span class="dash-story-date">{expired ? `${inProgress ? 'Finish' : 'Reopen'} for $6 →` : inProgress ? 'Continue →' : formatDate(story.created_at)}</span>
 						</a>
 					{/each}
 				</div>

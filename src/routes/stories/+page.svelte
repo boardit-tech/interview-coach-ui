@@ -103,20 +103,20 @@
 				{#each stories as story}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
-					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-incomplete={!inProgress(story) && story.tier === 'partial'} class:sb-story-inprogress={inProgress(story)} on:click={() => toggleExpand(story.id)}>
+					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-incomplete={story.expired} class:sb-story-inprogress={inProgress(story) && !story.expired} on:click={() => toggleExpand(story.id)}>
 						<div class="sb-story-top">
 							<div class="sb-story-info">
-								{#if inProgress(story)}
+								{#if story.expired}
+									<span class="sb-story-badge">Window ended{inProgress(story) ? ` · ${greenCount(story)} of 4 solid` : ''}</span>
+								{:else if inProgress(story)}
 									<span class="sb-story-badge sb-badge-progress">In progress · {greenCount(story)} of 4 sections solid</span>
-								{:else if story.tier === 'partial'}
-									<span class="sb-story-badge">Incomplete</span>
 								{/if}
 								<h3 class:untitled={!titleOf(story)}>{titleOf(story) || (inProgress(story) ? 'Untitled story — question not settled yet' : 'Undefined interview question')}</h3>
 							</div>
 							<div class="sb-story-meta">
-								{#if inProgress(story) && story.expired}
-									<span class="sb-story-date">window ended</span>
-									<button class="sb-continue-btn" on:click|stopPropagation={() => goto(`/credits?finish=${story.id}`)}>Finish for $6</button>
+								{#if story.expired}
+									<span class="sb-story-date">ended {formatDate(story.expiresAt)}</span>
+									<button class="sb-continue-btn" on:click|stopPropagation={() => goto(`/credits?finish=${story.id}`)}>{inProgress(story) ? 'Finish' : 'Reopen'} for $6</button>
 								{:else if inProgress(story)}
 									<span class="sb-story-date">last worked on {lastActive(story)}</span>
 									<button class="sb-continue-btn" on:click|stopPropagation={() => resume(story)}>Continue</button>
@@ -436,6 +436,8 @@
 		align-items: center;
 		gap: 10px;
 		flex-shrink: 0;
+		flex-wrap: nowrap;
+		white-space: nowrap;
 	}
 	.sb-story-date {
 		font-size: 0.82rem;
