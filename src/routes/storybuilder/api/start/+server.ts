@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { createSession, startSession } from '$lib/server/interview';
-import { hasActiveSubscription } from '$lib/server/billing';
+import { decideNewStory, decideResume } from '$lib/server/entitlement';
 
 // Start a sitting on a story.
 //
@@ -9,10 +9,10 @@ import { hasActiveSubscription } from '$lib/server/billing';
 //   { storyId }                  -> resume: new session on an existing story
 //   { storyId, takeover: true }  -> resume, evicting a session another tab holds
 //
-// Entitlement bridge until Phase 5 (decided 2026-09-07): a credit is spent when a
-// STORY is created, never on resume — which is also the Phase 5 conversion rule
-// (one credit = one story). Legacy subscribers pass as before. Bundle purchases
-// don't gate anything yet; their consumption fires at finalize (3.4 / Phase 5).
+// Entitlement (5.1, decided 2026-09-08): an allowance is spent when a STORY is
+// created, never on resume. Order: purchases → subscription → legacy credit; see
+// $lib/server/entitlement. A resume only checks the story's own window (with a
+// 1-hour grace) and spends nothing.
 export const POST: RequestHandler = async ({ locals, request }) => {
   const authSession = await locals.getSession();
   if (!authSession) {
@@ -39,11 +39,17 @@ export const POST: RequestHandler = async ({ locals, request }) => {
     // Ownership is enforced by RLS: a story that isn't ours reads as "not found".
     const { data: story, error: storyErr } = await locals.supabase
       .from('stories')
-      .select('id, status, star_sections, star_status, extracted_question')
+      .select('id, status, star_sections, star_status, extracted_question, purchase_id')
       .eq('id', body.storyId)
       .single();
     if (storyErr || !story) {
       return json({ error: 'story_not_found' }, { status: 404 });
+    }
+    const resume = await decideResume(locals.supabase, story);
+    if (!resume.ok) {
+      // Window closed and the grace hour has passed. The client offers the $6
+      // finish-this-story purchase.
+      return json({ error: 'story_expired', expiredAt: resume.expiredAt }, { status: 402 });
     }
     storyId = story.id;
     storyState = {
@@ -54,19 +60,19 @@ export const POST: RequestHandler = async ({ locals, request }) => {
     };
   } else {
     // Determine entitlement server-side (authoritative — never trust the client).
-    let subscriber = false;
-    try {
-      subscriber = await hasActiveSubscription(locals.supabase, userId, email);
-    } catch (err: any) {
-      // If Stripe is unreachable we cannot confirm entitlement. Fail closed rather
-      // than risk giving a free story; the user can retry.
-      console.error('Subscription check failed on start:', err.message);
-      return json({ error: 'billing_unavailable' }, { status: 503 });
+    const { data: profile } = await locals.supabase
+      .from('profiles').select('credits').eq('id', userId).single();
+    const decision = await decideNewStory(locals.supabase, userId, email, (profile?.credits ?? 0) > 0);
+
+    if (!decision.ok) {
+      const status = decision.reason === 'billing_unavailable' ? 503 : 402;
+      return json({ error: decision.reason }, { status });
     }
 
-    // Atomic credit deduction for non-subscribers. Happens BEFORE anything
-    // expensive, so we never pay for Claude then fail to charge.
-    if (!subscriber) {
+    // Legacy credit: atomic deduction BEFORE anything expensive, so we never pay
+    // for Claude then fail to charge. (Purchases are consumed AFTER the story row
+    // exists, below — consume_story needs the story id.)
+    if (decision.via === 'credit') {
       const { data: result, error: deductError } = await locals.supabase.rpc('deduct_credit', {
         p_session_id: coachSession.id,
       });
@@ -92,6 +98,23 @@ export const POST: RequestHandler = async ({ locals, request }) => {
       return json({ error: 'start_failed' }, { status: 500 });
     }
     storyId = story.id;
+
+    if (decision.via === 'purchase') {
+      const { error: consumeErr } = await locals.supabase.rpc('consume_story', {
+        p_story_id: storyId,
+        p_purchase_id: decision.purchaseId,
+        p_reason: 'story_started',
+      });
+      if (consumeErr) {
+        // Raced (two tabs spending the last allowance) or the purchase changed
+        // under us. Don't leave a free story behind.
+        console.error('consume_story failed:', consumeErr.message);
+        await undoStart(locals.supabase, coachSession.id, false, storyId);
+        const reason = /exhausted/.test(consumeErr.message) ? 'no_stories'
+          : /expired/.test(consumeErr.message) ? 'window_ended' : 'start_failed';
+        return json({ error: reason }, { status: reason === 'start_failed' ? 500 : 402 });
+      }
+    }
   }
 
   // ── One-tab lock ─────────────────────────────────────────────────────────
