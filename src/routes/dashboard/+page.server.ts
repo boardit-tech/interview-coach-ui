@@ -9,7 +9,7 @@ export const load: PageServerLoad = async ({ locals, parent, depends }) => {
     const parentData = await parent();
     const session = await locals.getSession();
     if (!session) {
-        return { recentStories: [], totalStories: 0, totalSessions: 0 };
+        return { recentStories: [], totalStories: 0, completedStories: 0, inProgressStories: 0, totalSessions: 0 };
     }
 
     const userId = session.user.id;
@@ -22,11 +22,14 @@ export const load: PageServerLoad = async ({ locals, parent, depends }) => {
         .order('updated_at', { ascending: false })
         .limit(3);
 
-    // Count total stories
-    const { count: totalStories } = await locals.supabase
-        .from('stories')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId);
+    // Counts by status — the recent list is capped at 3, so never count from it.
+    const [{ count: completedStories }, { count: inProgressStories }] = await Promise.all([
+        locals.supabase.from('stories').select('id', { count: 'exact', head: true })
+            .eq('user_id', userId).eq('status', 'complete'),
+        locals.supabase.from('stories').select('id', { count: 'exact', head: true })
+            .eq('user_id', userId).eq('status', 'in_progress'),
+    ]);
+    const totalStories = (completedStories || 0) + (inProgressStories || 0);
 
     // Count total sessions
     const { count: totalSessions } = await locals.supabase
@@ -53,6 +56,8 @@ export const load: PageServerLoad = async ({ locals, parent, depends }) => {
         plan,
         recentStories: storiesWithExpiry,
         totalStories: totalStories || 0,
+        completedStories: completedStories || 0,
+        inProgressStories: inProgressStories || 0,
         totalSessions: totalSessions || 0,
         recentSessions: recentSessions || [],
         username: parentData.username || '',

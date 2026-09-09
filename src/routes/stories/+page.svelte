@@ -411,7 +411,7 @@
 	.sb-story-top {
 		display: flex;
 		justify-content: space-between;
-		align-items: flex-start;
+		align-items: center;
 		gap: 16px;
 	}
 	.sb-story-info {
@@ -432,11 +432,12 @@
 		margin: 4px 0 0;
 	}
 	.sb-story-meta {
-		display: flex;
+		display: grid;
+		grid-template-columns: auto auto auto;
+		grid-auto-flow: column;
 		align-items: center;
-		gap: 10px;
+		column-gap: 14px;
 		flex-shrink: 0;
-		flex-wrap: nowrap;
 		white-space: nowrap;
 	}
 	.sb-story-date {
@@ -610,6 +611,6 @@
 
 	@media (max-width: 600px) {
 		.sb-header h1 { font-size: 1.5rem; }
-		.sb-story-top { flex-direction: column; gap: 6px; }
+		.sb-story-top { flex-direction: column; align-items: flex-start; gap: 10px; }
 	}
 </style>

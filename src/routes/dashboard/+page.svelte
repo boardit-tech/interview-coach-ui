@@ -97,11 +97,11 @@
 				<h3>Achievements</h3>
 				<div class="dash-stats">
 					<div class="dash-stat">
-						<span class="dash-stat-value">{totalStories}</span>
+						<span class="dash-stat-value">{data.completedStories ?? 0}</span>
 						<span class="dash-stat-label">{totalStories === 1 ? 'Story' : 'Stories'} Built</span>
 					</div>
 					<div class="dash-stat">
-						<span class="dash-stat-value">{recentStories.filter(s => s.status === 'in_progress').length}</span>
+						<span class="dash-stat-value">{data.inProgressStories ?? 0}</span>
 						<span class="dash-stat-label">In Progress</span>
 					</div>
 				</div>
