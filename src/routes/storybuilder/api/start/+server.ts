@@ -20,7 +20,6 @@ export const POST: RequestHandler = async ({ locals, request }) => {
   }
 
   const userId = authSession.user.id;
-  const email = authSession.user.email || '';
 
   // The current client posts with no body; tolerate that.
   let body: { storyId?: string; takeover?: boolean } = {};
@@ -62,11 +61,10 @@ export const POST: RequestHandler = async ({ locals, request }) => {
     // Determine entitlement server-side (authoritative — never trust the client).
     const { data: profile } = await locals.supabase
       .from('profiles').select('credits').eq('id', userId).single();
-    const decision = await decideNewStory(locals.supabase, userId, email, (profile?.credits ?? 0) > 0);
+    const decision = await decideNewStory(locals.supabase, (profile?.credits ?? 0) > 0);
 
     if (!decision.ok) {
-      const status = decision.reason === 'billing_unavailable' ? 503 : 402;
-      return json({ error: decision.reason }, { status });
+      return json({ error: decision.reason }, { status: 402 });
     }
 
     // Legacy credit: atomic deduction BEFORE anything expensive, so we never pay

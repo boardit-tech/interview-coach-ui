@@ -41,15 +41,11 @@ export const load: LayoutServerLoad = async ({ locals, url, depends }) => {
             loggedIn: true,
             username: name,
             credits,
-            subscriptionID: null,
-            subscriptionCancelAt: null,
-            subscriptionRenewAt: null,
         };
     }
 
     return {
         loggedIn: false,
-        subscriptionID: null,
         username: '',
         credits: 0,
     };

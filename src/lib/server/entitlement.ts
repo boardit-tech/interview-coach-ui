@@ -1,12 +1,11 @@
-import { hasActiveSubscription } from './billing';
-
 // ── Who may start a sitting, and what it costs ───────────────────────────────
 //
-// Decided 2026-09-08. Order for a NEW story:
+// Decided 2026-09-08, subscription step removed 2026-09-09 (no individual has
+// one any more; B2B seats will be a DB row written by a webhook, never a live
+// Stripe query). Order for a NEW story:
 //   1. purchases (our DB) — soonest-expiring unbound allowance with room. Spends it.
-//   2. Stripe subscription — kept for future coach seats; the only step that can
-//      fail closed, because it's the only one whose answer lives outside our DB.
-//   3. legacy credit — until blast day converts the remaining holders.
+//   2. legacy credit — until blast day converts the remaining holders.
+// Nothing here talks to Stripe, so a Stripe outage cannot block a start.
 // A RESUME spends nothing; it checks the story's own purchase window, with a
 // 1-hour grace after expiry for a story that already has a sitting.
 
@@ -16,9 +15,8 @@ export type BlockReason = 'no_stories' | 'window_ended' | 'no_purchase';
 
 export type StartDecision =
   | { ok: true; via: 'purchase'; purchaseId: string }
-  | { ok: true; via: 'subscription' }
   | { ok: true; via: 'credit' }   // caller performs the deduct (it needs the session id)
-  | { ok: false; reason: BlockReason | 'billing_unavailable' };
+  | { ok: false; reason: BlockReason };
 
 export type ResumeDecision =
   | { ok: true; expiresAt: string | null; inGrace: boolean }
@@ -66,22 +64,10 @@ export async function findAllowance(
 
 export async function decideNewStory(
   supabase: any,
-  userId: string,
-  email: string,
   hasCredit: boolean
 ): Promise<StartDecision> {
   const { purchase, reason } = await findAllowance(supabase);
   if (purchase) return { ok: true, via: 'purchase', purchaseId: purchase.id };
-
-  try {
-    if (await hasActiveSubscription(supabase, userId, email)) return { ok: true, via: 'subscription' };
-  } catch (err: any) {
-    // The one unknowable case. Deny rather than guess — a free story during a
-    // Stripe outage is worse than a retry.
-    console.error('Subscription check failed on start:', err.message);
-    return { ok: false, reason: 'billing_unavailable' };
-  }
-
   if (hasCredit) return { ok: true, via: 'credit' };
   return { ok: false, reason };
 }

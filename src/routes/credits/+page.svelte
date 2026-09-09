@@ -65,15 +65,6 @@
 			<p class="credits-fineprint">Non-refundable. By placing the order, you agree to the terms of service.</p>
 
 		{:else}
-			{#if data.subscriber}
-				<div class="credits-active">
-					<div class="credits-active-top">
-						<span class="credits-active-badge">Active</span>
-						<span>Monthly Unlimited — legacy plan</span>
-					</div>
-					<a href="/credits/api/portal" class="credits-manage-link">Manage subscription &rarr;</a>
-				</div>
-			{/if}
 
 			<div class="credits-header">
 				<h1>Your plan</h1>

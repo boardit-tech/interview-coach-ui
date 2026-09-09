@@ -8,15 +8,14 @@
 	export let data;
 	// Reactive, not a one-time destructure: when a load re-runs (navigation or
 	// invalidate('app:credits')), these follow the fresh server data.
-	$: ({ loggedIn, credits, username, subscriptionID } = data);
-	$: subscriptionCancelAt = data.subscriptionCancelAt;
+	$: ({ loggedIn, credits, username } = data);
 	let isUserMenuOpen = false;
 
 	$: isStorybuilderPage = $page.url.pathname === '/storybuilder';
 	$: isDashboardPage = $page.url.pathname === '/dashboard';
 
 	// Server data is authoritative — re-sync the store whenever it changes.
-	$: userStore.set({ credits, subscriptionID, subscriptionCancelAt, loggedIn: loggedIn || false });
+	$: userStore.set({ credits, loggedIn: loggedIn || false });
 
 	let userMenuEl: HTMLElement;
 

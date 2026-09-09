@@ -27,7 +27,6 @@
 	// storyId is what makes resume possible; it lives in the URL (?story=) so a
 	// refresh resumes instead of silently creating a new story.
 	export let data: {
-		subscriber?: boolean;
 		resumeStory: { id: string; status: 'in_progress' | 'complete'; question: string | null; green: number; updatedAt: string; expiresAt: string | null; expired: boolean } | null;
 		plan: { storiesLeft: number; poolExpiresAt: string | null; hasAnyPurchase: boolean; allExpired: boolean } | null;
 		credits: number;
@@ -35,7 +34,7 @@
 	// Why a NEW story can't start, if it can't. Pre-computed from the plan on load
 	// and refreshed from the server's answer on a refused start.
 	let blockedReason: 'no_stories' | 'window_ended' | 'no_purchase' | null = null;
-	$: if (data?.plan && !data.subscriber && data.plan.storiesLeft === 0 && (data.credits ?? 0) === 0) {
+	$: if (data?.plan && data.plan.storiesLeft === 0 && (data.credits ?? 0) === 0) {
 		blockedReason = data.plan.allExpired ? 'window_ended' : data.plan.hasAnyPurchase ? 'no_stories' : 'no_purchase';
 	}
 	const fmtDay = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -846,8 +845,6 @@
 					blockedReason = errCode;
 				} else if (interviewRes.status === 402 || errCode === 'no_credits') {
 					blockedReason = 'no_purchase';
-				} else if (interviewRes.status === 503 || errCode === 'billing_unavailable') {
-					showToast("We couldn't verify your plan just now — no credit was used. Please try again.", 'error', 8000);
 				} else {
 					showToast('Something went wrong starting your session — no credit was used. Please try again.', 'error', 8000);
 				}
@@ -1343,9 +1340,9 @@
 				{#if windowEndsSoon}
 					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon)}.</p>
 				{/if}
-				{#if !data?.subscriber && data?.plan && data.plan.storiesLeft > 0 && data.plan.storiesLeft <= 3}
+				{#if data?.plan && data.plan.storiesLeft > 0 && data.plan.storiesLeft <= 3}
 					<p class="sb-lobby-left">{data.plan.storiesLeft} {data.plan.storiesLeft === 1 ? 'story' : 'stories'} left on your plan</p>
-				{:else if !data?.subscriber && data?.plan?.storiesLeft === 0 && (data?.credits ?? 0) > 0}
+				{:else if data?.plan?.storiesLeft === 0 && (data?.credits ?? 0) > 0}
 					<p class="sb-lobby-left">One credit starts this story.</p>
 				{/if}
 				<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
