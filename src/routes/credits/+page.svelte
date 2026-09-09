@@ -109,6 +109,7 @@
 
 			<div class="credits-header credits-header-more">
 				<h2>Get more stories</h2>
+				<p class="credits-subtitle">Every plan has a window on purpose: you buy at your motivation peak, and a deadline keeps it there. Stories you finish are yours forever.</p>
 			</div>
 			<div class="credits-cards">
 				{#each offerings as offering}
@@ -227,8 +228,10 @@
 	}
 	.credits-header-more {
 		margin-top: 40px;
-		h2 { font-size: 1.25rem; font-weight: 700; color: $text-dark; margin: 0 0 12px; }
+		margin-bottom: 16px;
+		h2 { font-size: 1.25rem; font-weight: 700; color: $text-dark; margin: 0 0 6px; }
 	}
+	.credits-active { margin-bottom: 32px; }
 	.credits-plan {
 		background: white;
 		border: 1px solid #f3d9c9;
