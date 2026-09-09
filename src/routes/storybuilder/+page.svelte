@@ -1303,7 +1303,7 @@
 					<h3>Another focused 20 minutes</h3>
 					<p style="color: #555; font-size: 0.9rem; margin-bottom: 0;">
 						Your coach remembers everything from before and will {resumeStory.status === 'complete' ? 'follow your lead on what to tighten up' : 'pick up at the next section'}.
-						No credit is used to continue a story.
+						Continuing a story never uses a story from your plan.
 					</p>
 				</div>
 				{#if windowEndsSoon}
