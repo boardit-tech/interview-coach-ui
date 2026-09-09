@@ -1,5 +1,5 @@
 import type { PageServerLoad } from './$types';
-import { getPlanSummary, storyExpiries } from '$lib/server/entitlement';
+import { getPlanSummary, storyExpiries, loadPurchases } from '$lib/server/entitlement';
 
 // The lobby needs two things before the mic turns on: what's about to be resumed
 // (question, progress, whether its window has closed), and whether a NEW story
@@ -11,8 +11,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 
   const storyId = url.searchParams.get('story');
 
-  const [plan, { data: profile }, storyRes] = await Promise.all([
-    getPlanSummary(locals.supabase),
+  const [snap, { data: profile }, storyRes] = await Promise.all([
+    loadPurchases(locals.supabase),
     locals.supabase.from('profiles').select('credits').eq('id', session.user.id).single(),
     storyId
       ? locals.supabase
@@ -23,10 +23,11 @@ export const load: PageServerLoad = async ({ locals, url }) => {
       : Promise.resolve({ data: null }),
   ]);
 
+  const plan = await getPlanSummary(locals.supabase, snap);
   let resumeStory = null;
   const data = storyRes.data;
   if (data) {
-    const exp = (await storyExpiries(locals.supabase, [data])).get(data.id) ?? null;
+    const exp = (await storyExpiries(locals.supabase, [data], snap)).get(data.id) ?? null;
     resumeStory = {
       id: data.id,
       status: data.status as 'in_progress' | 'complete',

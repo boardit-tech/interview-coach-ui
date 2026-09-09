@@ -107,18 +107,30 @@ export interface PlanSummary {
   allExpired: boolean;          // had purchases, none live
 }
 
-export async function getPlanSummary(supabase: any): Promise<PlanSummary> {
-  const { data: purchases } = await supabase
-    .from('purchases')
-    .select('id, stories_allowed, expires_at, revoked_at, for_story_id')
-    .is('revoked_at', null)
-    .order('expires_at', { ascending: true });
-  const all = purchases ?? [];
-  if (all.length === 0) return { storiesLeft: 0, poolExpiresAt: null, hasAnyPurchase: false, allExpired: false };
-
-  const { data: used } = await supabase.from('story_consumptions').select('purchase_id');
+// Everything a page needs about the user's purchases, in ONE parallel read:
+// used by getPlanSummary and storyExpiries so a page load does not fetch the
+// purchases table twice, serially.
+export interface PurchaseSnapshot {
+  purchases: Array<{ id: string; stories_allowed: number; expires_at: string; revoked_at: string | null; for_story_id: string | null }>;
+  usedCount: Map<string, number>;
+}
+export async function loadPurchases(supabase: any): Promise<PurchaseSnapshot> {
+  const [{ data: purchases }, { data: used }] = await Promise.all([
+    supabase
+      .from('purchases')
+      .select('id, stories_allowed, expires_at, revoked_at, for_story_id')
+      .order('expires_at', { ascending: true }),
+    supabase.from('story_consumptions').select('purchase_id'),
+  ]);
   const usedCount = new Map<string, number>();
   for (const c of used ?? []) usedCount.set(c.purchase_id, (usedCount.get(c.purchase_id) ?? 0) + 1);
+  return { purchases: purchases ?? [], usedCount };
+}
+
+export async function getPlanSummary(supabase: any, snap?: PurchaseSnapshot): Promise<PlanSummary> {
+  const { purchases, usedCount } = snap ?? await loadPurchases(supabase);
+  const all = purchases.filter(p => !p.revoked_at);
+  if (all.length === 0) return { storiesLeft: 0, poolExpiresAt: null, hasAnyPurchase: false, allExpired: false };
 
   const now = Date.now();
   let storiesLeft = 0;
@@ -140,14 +152,13 @@ export async function getPlanSummary(supabase: any): Promise<PlanSummary> {
 /** For a list of stories, which are past their window (and the grace hour). */
 export async function storyExpiries(
   supabase: any,
-  stories: Array<{ id: string; purchase_id: string | null; status: string }>
+  stories: Array<{ id: string; purchase_id: string | null; status: string }>,
+  snap?: PurchaseSnapshot
 ): Promise<Map<string, { expiresAt: string; expired: boolean }>> {
-  const ids = [...new Set(stories.map(s => s.purchase_id).filter(Boolean))] as string[];
   const out = new Map<string, { expiresAt: string; expired: boolean }>();
-  if (ids.length === 0) return out;
-  const { data: purchases } = await supabase
-    .from('purchases').select('id, expires_at, revoked_at').in('id', ids);
-  const byId = new Map<string, any>((purchases ?? []).map((p: any) => [p.id, p]));
+  if (!stories.some(s => s.purchase_id)) return out;
+  const { purchases } = snap ?? await loadPurchases(supabase);
+  const byId = new Map<string, any>(purchases.map((p: any) => [p.id, p]));
   const now = Date.now();
   for (const s of stories) {
     const p = s.purchase_id ? byId.get(s.purchase_id) : null;
