@@ -17,6 +17,7 @@ export type Kind = 'bundle' | 'single_story' | 'finish_story';
 export type Choice = {
     kind: Kind;
     price: number;
+    compareAt?: number;   // crossed-out list price (early-bird display)
     label: string;
     description: string;
     features: string[];
@@ -31,7 +32,8 @@ const stripe = new Stripe(import.meta.env['VITE_STRIPE_SECRET_KEY'], {
 const OFFERINGS: Record<Kind, Choice> = {
     bundle: {
         kind: 'bundle',
-        price: 79,
+        price: 89,
+        compareAt: 109,
         label: '60-day story bundle',
         description: 'Up to 15 interview-ready stories within 60 days of purchase.',
         features: [

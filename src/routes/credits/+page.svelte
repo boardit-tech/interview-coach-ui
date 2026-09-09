@@ -116,14 +116,17 @@
 						<form id={offering.kind} action="?/purchase" method="POST">
 							<input type="hidden" name="kind" value={offering.kind} />
 						</form>
-						{#if offering.kind === 'bundle'}
-							<span class="credits-badge">Best value</span>
+						{#if offering.compareAt}
+							<span class="credits-badge">Early bird</span>
 						{/if}
 						<div class="credits-card-top">
 							<h2>{offering.label}</h2>
 							<p class="credits-desc">{offering.description}</p>
 						</div>
 						<div class="credits-price">
+							{#if offering.compareAt}
+								<span class="credits-compare">${offering.compareAt}</span>
+							{/if}
 							<span class="credits-amount">${offering.price}</span>
 						</div>
 						<div class="credits-divider"></div>
@@ -210,6 +213,13 @@
 		grid-template-columns: repeat(2, 1fr);
 		gap: 24px;
 		margin-top: 8px;
+	}
+	.credits-compare {
+		font-size: 1.4rem;
+		color: #aaa;
+		text-decoration: line-through;
+		margin-right: 10px;
+		vertical-align: baseline;
 	}
 	.credits-cards-single {
 		grid-template-columns: minmax(0, 460px);
