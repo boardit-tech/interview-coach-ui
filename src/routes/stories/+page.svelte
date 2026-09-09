@@ -439,6 +439,13 @@
 		column-gap: 14px;
 		flex-shrink: 0;
 		white-space: nowrap;
+		/* A library stylesheet gives <button> its own display/margins, which pushed
+		   it ~12px below the date and chevron. Pin every child to the row's center. */
+		> * {
+			align-self: center;
+			margin: 0;
+			line-height: 1.2;
+		}
 	}
 	.sb-story-date {
 		font-size: 0.82rem;
