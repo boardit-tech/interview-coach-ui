@@ -23,5 +23,16 @@ where p.credits > 0
      where x.user_id = p.id and x.note like 'converted from %'
   );
 
--- verify: expect one row per credit holder (18 as of the 2026-09-07 snapshot)
+-- Zero the credits in the same run, or converted users would hold BOTH the new
+-- allowance and the old credits (double-counting), and the "Session credits" row
+-- on the plan page would linger. The audit trigger logs each as a
+-- 'manual_adjustment' ledger row, which is the correct record of the conversion.
+update public.profiles p
+   set credits = 0
+ where p.credits > 0
+   and exists (select 1 from public.purchases x where x.user_id = p.id and x.note like 'converted from %');
+
+-- verify: expect one purchase per former credit holder (18 as of the 2026-09-07
+-- snapshot), and zero credits left anywhere.
 -- select count(*), sum(stories_allowed) from purchases where note like 'converted from %';
+-- select count(*) from profiles where credits > 0;   -- 0
