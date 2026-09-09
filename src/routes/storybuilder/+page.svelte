@@ -1323,10 +1323,11 @@
 				<div class="sb-lobby-tips">
 					<h3>How it works</h3>
 					<ul>
-						<li>Tell your coach what type of questions you want to practice. Clarify as needed.</li>
+						<li>Tell your coach what question you want to practice. Clarify as needed.</li>
 						<li>Share a rough experience from your work. <strong>Feel free to ramble here!</strong></li>
-						<li>Your coach will ask insightful questions to extract the key details.</li>
+						<li>Your coach asks insightful questions to extract the key details.</li>
 						<li>Together you shape it into a Situation, Task, Action, Result story.</li>
+						<li>Each session is a focused 20 minutes. Come back as many times as the story needs, and your coach remembers everything.</li>
 						<li>Walk away with a ready-to-use interview answer, plus talking points.</li>
 					</ul>
 				</div>
