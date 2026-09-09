@@ -86,7 +86,7 @@
 			<!-- CTA card -->
 			<div class="dash-card dash-cta-card">
 				<h2>Build a new story</h2>
-				<p>Turn a real experience into a story interviewers remember. Focused 20-minute sittings with your AI coach, as many as the story needs.</p>
+				<p>Turn a real experience into a story interviewers remember. Focused 20-minute sessions with your AI coach, as many as the story needs.</p>
 				<button class="dash-cta-btn" on:click={() => goto('/storybuilder')}>
 					Start Building
 				</button>

@@ -20,7 +20,7 @@ const HANDBACK_LINE =
 const redirectLine = (question: string | null) =>
   `Let's stay with the story we're building — the one for ${question ?? 'the question we settled on'}. If that other experience deserves its own story, we can start it fresh afterwards. So, back to where we were.`;
 const CLOSING_LINE =
-  "I think that other experience wants to be its own story, and this one deserves to be finished on its own. Let's wrap this sitting here — you can pick either one up any time.";
+  "I think that other experience wants to be its own story, and this one deserves to be finished on its own. Let's wrap this session here — you can pick either one up any time.";
 
 const SESSION_LIMIT_MS = 20 * 60 * 1000; // 20 minutes
 
@@ -320,7 +320,7 @@ const RESUME_RECAP_GAP_MS = 10 * 60 * 1000;
 // suggestions are offered by the coach only if the user asks.
 function buildOpening(story: Story | null, resumed: boolean): string {
   if (!resumed || !story) {
-    return `Hey! Let's build you an interview-ready STAR story. We'll work in focused 20-minute sittings — that's enough to get a whole story out without burning you out, and you can always come back to sharpen it. Do you have a specific question in mind, or would you like my recommendation?`;
+    return `Hey! Let's build you an interview-ready STAR story. We'll work in focused 20-minute sessions — that's enough to get a whole story out without burning you out, and you can always come back to sharpen it. Do you have a specific question in mind, or would you like my recommendation?`;
   }
 
   const gapMs = Date.now() - new Date(story.updatedAt).getTime();
@@ -337,7 +337,7 @@ function buildOpening(story: Story | null, resumed: boolean): string {
   const intro = `Welcome back! We're picking up your story for the question: ${story.extractedQuestion}.`;
 
   if (!next) {
-    return `Welcome back! All four parts of your story are solid, so this sitting is for sharpening. We have 20 minutes — what would you like to tighten up?`;
+    return `Welcome back! All four parts of your story are solid, so this session is for sharpening. We have 20 minutes — what would you like to tighten up?`;
   }
   if (green.length === 0) {
     return `${intro} Fresh 20 minutes, fresh energy — let's get ${SECTION_LABEL[next]} solid first. Ready when you are.`;

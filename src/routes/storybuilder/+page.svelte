@@ -151,7 +151,7 @@
 	// prompt-cache TTL.
 	const IDLE_PROMPT_MS = 3 * 60 * 1000;
 	const IDLE_CLOSE_MS = 10 * 1000;
-	const IDLE_LINE = "Still with me? Take your time if you're thinking — or if now's not a good moment, we can wrap this sitting and pick it up later.";
+	const IDLE_LINE = "Still with me? Take your time if you're thinking — or if now's not a good moment, we can wrap this session and pick it up later.";
 	let lastUserActivity = 0;
 	let idleCard = false;
 	let idleWatch: ReturnType<typeof setInterval> | null = null;
@@ -987,7 +987,7 @@
 	async function handleEnd(auto = false) {
 		if (!auto) {
 			// Subscribers aren't charged per session — don't mention credits to them.
-			if (!confirm('Finish this sitting? You can come back to this story any time.')) return;
+			if (!confirm('Finish this session? You can come back to this story any time.')) return;
 		}
 
 		userConfirmedEnd = true;
@@ -1557,7 +1557,7 @@
 				<div class="sb-call-view">
 					{#if idleCard && !superseded}
 						<div class="sb-idle-card" role="status">
-							<p>Still there? This sitting will wrap up on its own in a moment — your progress is saved either way.</p>
+							<p>Still there? This session will wrap up on its own in a moment — your progress is saved either way.</p>
 							<button class="sb-start-btn" on:click={handleStillHere}>I'm still here</button>
 						</div>
 					{/if}

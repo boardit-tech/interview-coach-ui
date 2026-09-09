@@ -177,13 +177,13 @@ IMPORTANT RULES:
 - If they seem stuck, offer prompts that guide them to think deeper in some directions, or encourage to ask clarification questions.
 - Be warm and conversational, not clinical
 - NEVER re-ask about something the user already told you. Before asking a question, mentally check: did the user already cover this in a previous response? If so, acknowledge what they said and probe DEEPER or move to the NEXT topic. Repeating questions wastes session time and frustrates the user. If the user gave a long answer covering multiple topics, acknowledge the breadth before narrowing in on what needs more detail.
-- A story can span more than one sitting; you'll be told which kind this one is. PACING IS CRITICAL: A 20-minute session goes fast. Don't over-probe one section. Aim to cover Situation by ~5 min, Task by ~8 min, Action by ~14 min, Result by ~17 min. If you're behind, compress — combine probing, or move on with what you have.
+- A story can span more than one session; you'll be told which kind this one is. PACING IS CRITICAL: A 20-minute session goes fast. Don't over-probe one section. Aim to cover Situation by ~5 min, Task by ~8 min, Action by ~14 min, Result by ~17 min. If you're behind, compress — combine probing, or move on with what you have.
 
 QUESTION-STORY ALIGNMENT: The finalized STAR story must clearly answer the interview question the user chose to practice. Keep the question's theme front and center throughout coaching. For example, if the question is about a mistake, probe for the actual mistake and what went wrong — don't let the user sanitize it into a pure success story. If about conflict, surface the real disagreement. If about failure, the failure must be visible.
 
 SWITCHING EXPERIENCES OR QUESTIONS: The interview question is fixed for this story once it's been settled — a different question is a different story, and you say so plainly. The EXPERIENCE underneath it is a different matter:
 - While NO section is solid yet, switching to a different experience is normal coaching. If the first pick has no clear ending or the user thinks of a better one, say "sure, tell me about that one" and move on — briefly check the new one has an outcome they can point to. No warnings about time.
-- Once ANY section is solid (you are told which), do NOT blend two experiences — that muddies the story. Present the choice, in roughly these words: "That could work too. We've already got [the solid sections] locked in for this one, though, and mixing them would muddy the story. Two options: we keep building this one, or we wrap up here and you start a fresh story for the other project. Which do you prefer?" Then follow their choice. If they choose to switch, say you'll wrap up this sitting so they can start the other one fresh — do NOT start coaching the new experience.
+- Once ANY section is solid (you are told which), do NOT blend two experiences — that muddies the story. Present the choice, in roughly these words: "That could work too. We've already got [the solid sections] locked in for this one, though, and mixing them would muddy the story. Two options: we keep building this one, or we wrap up here and you start a fresh story for the other project. Which do you prefer?" Then follow their choice. If they choose to switch, say you'll wrap up this session so they can start the other one fresh — do NOT start coaching the new experience.
 
 SUPPORTED QUESTION TYPES: This coaching tool is designed specifically for situation-based behavioral interview questions — questions that start with "Tell me about a time when..." or ask for a specific example from real work experience. These are the questions that map to the STAR framework.
 
@@ -232,15 +232,15 @@ function buildPacingContext(
     : `No sections captured yet. Still needed: ${missing.join(', ')}.`;
 
   const modeLine = {
-    fresh: 'First sitting on this story.',
-    continue: 'Continuing a story from an earlier sitting. Do NOT re-ask anything already in the transcript, and do not reopen sections that are already solid unless the user raises them.',
-    polish: 'All four sections are solid; this sitting is for sharpening. No agenda of your own — probe only what the user raises, and hand control back after each change.',
+    fresh: 'First session on this story.',
+    continue: 'Continuing a story from an earlier session. Do NOT re-ask anything already in the transcript, and do not reopen sections that are already solid unless the user raises them.',
+    polish: 'All four sections are solid; this session is for sharpening. No agenda of your own — probe only what the user raises, and hand control back after each change.',
   }[mode];
 
   // Wrap rule, shared by every mode.
   const wrapNow = allGreen
     ? 'URGENT: wrap up now. Acknowledge the story is solid and tell the user you will polish it into the final version. Do NOT mention minutes. No new questions.'
-    : `URGENT: wrap up now. Say which sections are solid and that ${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} still to come, and that the next sitting picks up right there. Do NOT mention minutes, do NOT promise a polished story, no new questions.`;
+    : `URGENT: wrap up now. Say which sections are solid and that ${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} still to come, and that the next session picks up right there. Do NOT mention minutes, do NOT promise a polished story, no new questions.`;
 
   let urgency = '';
   if (elapsedMinutes > 17) {
@@ -292,7 +292,7 @@ function buildPacingContext(
     }
   }
 
-  return `\n\n[Sitting: ${mode}. Session time: ${Math.round(elapsedMinutes)} min of 20. ${modeLine} ${progressLine}${urgency ? ' ' + urgency : ''}]`;
+  return `\n\n[Session kind: ${mode}. Session time: ${Math.round(elapsedMinutes)} min of 20. ${modeLine} ${progressLine}${urgency ? ' ' + urgency : ''}]`;
 }
 
 // ── Streaming coach response ──
