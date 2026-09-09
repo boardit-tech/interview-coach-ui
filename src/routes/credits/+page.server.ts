@@ -7,7 +7,7 @@ import {
     VITE_STRIPE_ID_SINGLE_STORY,
     VITE_STRIPE_ID_FINISH_STORY,
 } from '$env/static/private';
-import { resolveCustomerId } from '$lib/server/billing';
+import { resolveCustomerId, hasActiveSubscription } from '$lib/server/billing';
 
 // One-time purchases only for individuals (decided 2026-09-08). The monthly
 // subscription is gone from this page; the Stripe subscription CHECK stays in
@@ -80,8 +80,15 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     }> = [];
     let credits = 0;
     let finishStory: { id: string; question: string | null } | null = null;
+    let subscriber = false;
 
     if (session) {
+        // Legacy monthly card, until blast day. Looked up here rather than in the
+        // root layout so it costs a Stripe round trip only on this page.
+        try {
+            subscriber = await hasActiveSubscription(locals.supabase, session.user.id, session.user.email || '');
+        } catch { /* display only */ }
+
         const [{ data: purchases }, { data: consumptions }, { data: profile }] = await Promise.all([
             locals.supabase
                 .from('purchases')
@@ -123,6 +130,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
         finishStory,
         plan,
         credits,
+        subscriber,
     };
 };
 

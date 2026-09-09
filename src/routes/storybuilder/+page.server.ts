@@ -1,5 +1,6 @@
 import type { PageServerLoad } from './$types';
 import { getPlanSummary, storyExpiries } from '$lib/server/entitlement';
+import { hasActiveSubscription } from '$lib/server/billing';
 
 // The lobby needs two things before the mic turns on: what's about to be resumed
 // (question, progress, whether its window has closed), and whether a NEW story
@@ -7,7 +8,16 @@ import { getPlanSummary, storyExpiries } from '$lib/server/entitlement';
 // read to the user's own rows.
 export const load: PageServerLoad = async ({ locals, url }) => {
   const session = await locals.getSession();
-  if (!session) return { resumeStory: null, plan: null, credits: 0 };
+  if (!session) return { resumeStory: null, plan: null, credits: 0, subscriber: false };
+
+  // Legacy subscribers (two accounts, until blast day) bypass the allowance
+  // gates below. Looked up here — not in the root layout — so it costs a Stripe
+  // round trip only on this page. Any failure reads as "not a subscriber"; the
+  // authoritative check is in /api/start.
+  let subscriber = false;
+  try {
+    subscriber = await hasActiveSubscription(locals.supabase, session.user.id, session.user.email || '');
+  } catch { /* fail open for display only */ }
 
   const storyId = url.searchParams.get('story');
 
@@ -38,5 +48,5 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     };
   }
 
-  return { resumeStory, plan, credits: profile?.credits ?? 0 };
+  return { subscriber, resumeStory, plan, credits: profile?.credits ?? 0 };
 };
