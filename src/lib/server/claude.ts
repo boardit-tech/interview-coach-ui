@@ -292,7 +292,11 @@ function buildPacingContext(
     }
   }
 
-  return `\n\n[Session kind: ${mode}. Session time: ${Math.round(elapsedMinutes)} min of 20. ${modeLine} ${progressLine}${urgency ? ' ' + urgency : ''}]`;
+  // The opener ("Hey!" / "Welcome back!") is a scripted line already in the
+  // transcript. Without this, the model copies its shape and greets a second time
+  // on the first real turn — "Welcome back! Welcome back…".
+  const noGreeting = 'The session opener has already been spoken — never greet, never say "welcome back", answer directly.';
+  return `\n\n[Session kind: ${mode}. Session time: ${Math.round(elapsedMinutes)} min of 20. ${noGreeting} ${modeLine} ${progressLine}${urgency ? ' ' + urgency : ''}]`;
 }
 
 // ── Streaming coach response ──
