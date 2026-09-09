@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { tz } from '$lib/stores/tz';
 
 	export let data;
 
@@ -11,12 +12,13 @@
 		expandedId = expandedId === id ? null : id;
 	};
 
-	const formatDate = (dateStr: string) => {
+	const formatDate = (dateStr: string, zone?: string) => {
 		const d = new Date(dateStr);
 		return d.toLocaleDateString('en-US', {
 			month: 'short',
 			day: 'numeric',
 			year: 'numeric',
+			timeZone: zone,
 		});
 	};
 
@@ -70,13 +72,13 @@
 	const titleOf = (story: any) => story.question || story.extracted_question || null;
 	const greenCount = (story: any) =>
 		SECTION_KEYS.filter(k => !!story.star_sections?.[k]).length;
-	const lastActive = (story: any) => {
+	const lastActive = (story: any, zone?: string) => {
 		const d = new Date(story.updated_at || story.created_at);
 		const days = Math.floor((Date.now() - d.getTime()) / 86400000);
 		if (days === 0) return 'today';
 		if (days === 1) return 'yesterday';
 		if (days < 7) return `${days} days ago`;
-		return formatDate(d.toISOString());
+		return formatDate(d.toISOString(), zone);
 	};
 	const resume = (story: any) => goto(`/storybuilder?story=${story.id}`);
 </script>
@@ -115,13 +117,13 @@
 							</div>
 							<div class="sb-story-meta">
 								{#if story.expired}
-									<span class="sb-story-date">ended {formatDate(story.expiresAt)}</span>
+									<span class="sb-story-date">ended {formatDate(story.expiresAt, $tz)}</span>
 									<button class="sb-continue-btn" on:click|stopPropagation={() => goto(`/credits?finish=${story.id}`)}>{inProgress(story) ? 'Finish' : 'Reopen'} for $6</button>
 								{:else if inProgress(story)}
-									<span class="sb-story-date">last worked on {lastActive(story)}</span>
+									<span class="sb-story-date">last worked on {lastActive(story, $tz)}</span>
 									<button class="sb-continue-btn" on:click|stopPropagation={() => resume(story)}>Continue</button>
 								{:else}
-									<span class="sb-story-date">{formatDate(story.created_at)}</span>
+									<span class="sb-story-date">{formatDate(story.created_at, $tz)}</span>
 									<button class="sb-sharpen-btn" on:click|stopPropagation={() => resume(story)}>Sharpen</button>
 								{/if}
 								<span class="sb-story-toggle">{expandedId === story.id ? '▲' : '▼'}</span>

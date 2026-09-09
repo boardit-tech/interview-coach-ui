@@ -3,6 +3,7 @@
 	import { browser } from '$app/environment';
 	import { goto, invalidate } from '$app/navigation';
 	import { userStore } from '$lib/stores/userStore';
+	import { tz } from '$lib/stores/tz';
 
 	// ── State ──
 	let phase: 'lobby' | 'coaching' | 'loading-report' | 'report' = 'lobby';
@@ -37,7 +38,7 @@
 	$: if (data?.plan && data.plan.storiesLeft === 0 && (data.credits ?? 0) === 0) {
 		blockedReason = data.plan.allExpired ? 'window_ended' : data.plan.hasAnyPurchase ? 'no_stories' : 'no_purchase';
 	}
-	const fmtDay = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+	const fmtDay = (iso: string, zone?: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: zone });
 	const daysUntil = (iso: string) => Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
 	// The window that governs THIS action: the story's own when resuming, the pool's when starting.
 	$: governingExpiry = resumeStory ? resumeStory.expiresAt : data?.plan?.poolExpiresAt ?? null;
@@ -1306,7 +1307,7 @@
 					</p>
 				</div>
 				{#if windowEndsSoon}
-					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon)}.</p>
+					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon, $tz)}.</p>
 				{/if}
 				<div class="sb-lobby-actions">
 					<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
@@ -1338,7 +1339,7 @@
 					</p>
 				</div>
 				{#if windowEndsSoon}
-					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon)}.</p>
+					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon, $tz)}.</p>
 				{/if}
 				{#if data?.plan && data.plan.storiesLeft > 0 && data.plan.storiesLeft <= 3}
 					<p class="sb-lobby-left">{data.plan.storiesLeft} {data.plan.storiesLeft === 1 ? 'story' : 'stories'} left on your plan</p>

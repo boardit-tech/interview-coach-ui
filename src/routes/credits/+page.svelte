@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { userStore } from '$lib/stores/userStore';
+	import { tz } from '$lib/stores/tz';
 
 	export let data;
 
@@ -14,8 +15,8 @@
 		if (form instanceof HTMLFormElement) form.submit();
 	};
 
-	const fmtDate = (iso: string) =>
-		new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+	const fmtDate = (iso: string, zone?: string) =>
+		new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: zone });
 	const kindLabel = (p: any) =>
 		p.kind === 'bundle' ? '60-day story bundle'
 		: p.kind === 'finish_story' ? 'Finish this story'
@@ -83,7 +84,7 @@
 								<span class="credits-plan-kind">{kindLabel(p)}</span>
 								{#if usage(p)}<span class="credits-plan-usage">{usage(p)}</span>{/if}
 							</div>
-							<span class="credits-plan-ends">ends {fmtDate(p.expiresAt)}</span>
+							<span class="credits-plan-ends">ends {fmtDate(p.expiresAt, $tz)}</span>
 						</div>
 					{/each}
 					{#if credits > 0}
@@ -142,7 +143,7 @@
 								<span class="credits-plan-kind">{kindLabel(p)}</span>
 								{#if usage(p)}<span class="credits-plan-usage">{usage(p)}</span>{/if}
 							</div>
-							<span class="credits-plan-ends">{p.revoked ? 'refunded' : `ended ${fmtDate(p.expiresAt)}`}</span>
+							<span class="credits-plan-ends">{p.revoked ? 'refunded' : `ended ${fmtDate(p.expiresAt, $tz)}`}</span>
 						</div>
 					{/each}
 				</details>

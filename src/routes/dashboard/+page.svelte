@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { userStore } from '$lib/stores/userStore';
 	import { goto } from '$app/navigation';
+	import { tz } from '$lib/stores/tz';
 
 	export let data;
 
@@ -11,14 +12,14 @@
 	$: plan = data.plan;
 	$: storiesLeft = plan?.storiesLeft ?? 0;
 
-	const formatDate = (dateStr: string) => {
+	const formatDate = (dateStr: string, zone?: string) => {
 		const d = new Date(dateStr);
-		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: zone });
 	};
 
-	const formatSessionDate = (dateStr: string) => {
+	const formatSessionDate = (dateStr: string, zone?: string) => {
 		const d = new Date(dateStr);
-		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: zone });
 	};
 
 	const getGreeting = () => {
@@ -149,7 +150,7 @@
 							<span class="dash-story-title" class:untitled={!title}>
 								{title || (inProgress ? 'Untitled story' : 'Undefined interview question')}
 							</span>
-							<span class="dash-story-date">{expired ? `${inProgress ? 'Finish' : 'Reopen'} for $6 →` : inProgress ? 'Continue →' : formatDate(story.created_at)}</span>
+							<span class="dash-story-date">{expired ? `${inProgress ? 'Finish' : 'Reopen'} for $6 →` : inProgress ? 'Continue →' : formatDate(story.created_at, $tz)}</span>
 						</a>
 					{/each}
 				</div>
@@ -195,7 +196,7 @@
 							<option value="">Not sure / general</option>
 							{#each recentSessions as s}
 								<option value={s.session_id}>
-									{formatSessionDate(s.created_at)} — {s.status}
+									{formatSessionDate(s.created_at, $tz)} — {s.status}
 								</option>
 							{/each}
 						</select>
