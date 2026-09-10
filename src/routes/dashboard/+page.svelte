@@ -137,18 +137,17 @@
 						{@const title = story.question || story.extracted_question}
 						{@const green = ['situation', 'task', 'action', 'result'].filter(k => !!story.star_sections?.[k]).length}
 						{@const expired = !!story.expired}
-						<a href={expired ? `/credits?finish=${story.id}` : inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:inprogress={inProgress && !expired} class:expired={expired}>
-							{#if expired}
-								<span class="dash-story-badge">Window ended{inProgress ? ` · ${green}/4` : ''}</span>
-							{:else if inProgress}
+						<a href={expired ? `/credits?finish=${story.id}` : inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:inprogress={inProgress} class:complete={!inProgress}>
+							{#if inProgress}
 								<span class="dash-story-badge dash-badge-progress">In progress · {green}/4</span>
-							{:else if story.tier === 'partial'}
-								<span class="dash-story-badge">Incomplete</span>
+							{/if}
+							{#if expired}
+								<span class="dash-story-badge dash-badge-ended">Window ended</span>
 							{/if}
 							<span class="dash-story-title" class:untitled={!title}>
 								{title || (inProgress ? 'Untitled story' : 'Undefined interview question')}
 							</span>
-							<span class="dash-story-date">{expired ? `${inProgress ? 'Finish' : 'Reopen'} for $6 →` : inProgress ? 'Continue →' : formatDate(story.created_at, $tz)}</span>
+							<span class="dash-story-date">{expired ? `${inProgress ? 'Finish' : 'Sharpen'} for $6 →` : inProgress ? 'Continue →' : formatDate(story.created_at, $tz)}</span>
 						</a>
 					{/each}
 				</div>
@@ -421,22 +420,20 @@
 	}
 	/* Incomplete sessions still live in the Story Bank — the user paid for them —
 	   but are visually distinct from finished, interview-ready stories. */
-	.dash-story-card.incomplete {
-		background: #fdeceb;
-		border: 1px dashed #f0b8b2;
-	}
-	/* In-progress stories: resumable, so the card links straight into the session. */
+	/* Tile color follows STATUS only; the window is a badge + link text. */
 	.dash-story-card.inprogress {
-		border: 1px solid #f3d9c9;
+		background: #fff8e6;
+		border: 1px dashed #e6c46a;
 	}
-	.dash-story-card.expired {
-		border: 1px dashed #f0b8b2;
-		background: #fdeceb;
+	.dash-story-card.complete {
+		background: #f1f8ee;
+		border: 1px dashed #9ccc8a;
 	}
+	.dash-badge-ended { color: #666 !important; background: #ececec !important; }
 	.dash-left-note { color: #8a5a00; background: #fff6e5; border-radius: 8px; padding: 6px 10px; display: inline-block; }
 	.dash-badge-progress {
-		color: #9a4a2e !important;
-		background: #fbe7dc !important;
+		color: #8a5a00 !important;
+		background: #fdecc0 !important;
 	}
 	.dash-story-badge {
 		align-self: flex-start;
@@ -444,8 +441,8 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: #b0392c;
-		background: #fbd9d5;
+		color: #8a5a00;
+		background: #fdecc0;
 		border-radius: 10px;
 		padding: 2px 8px;
 	}

@@ -105,20 +105,21 @@
 				{#each stories as story}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
-					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-incomplete={story.expired} class:sb-story-inprogress={inProgress(story) && !story.expired} on:click={() => toggleExpand(story.id)}>
+					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-inprogress={inProgress(story)} class:sb-story-complete={!inProgress(story)} on:click={() => toggleExpand(story.id)}>
 						<div class="sb-story-top">
 							<div class="sb-story-info">
-								{#if story.expired}
-									<span class="sb-story-badge">Window ended{inProgress(story) ? ` · ${greenCount(story)} of 4 solid` : ''}</span>
-								{:else if inProgress(story)}
+								{#if inProgress(story)}
 									<span class="sb-story-badge sb-badge-progress">In progress · {greenCount(story)} of 4 sections solid</span>
+								{/if}
+								{#if story.expired}
+									<span class="sb-story-badge sb-badge-ended">Window ended</span>
 								{/if}
 								<h3 class:untitled={!titleOf(story)}>{titleOf(story) || (inProgress(story) ? 'Untitled story — question not settled yet' : 'Undefined interview question')}</h3>
 							</div>
 							<div class="sb-story-meta">
 								{#if story.expired}
 									<span class="sb-story-date">ended {formatDate(story.expiresAt, $tz)}</span>
-									<button class="sb-continue-btn" on:click|stopPropagation={() => goto(`/credits?finish=${story.id}`)}>{inProgress(story) ? 'Finish' : 'Reopen'} for $6</button>
+									<button class="sb-continue-btn" on:click|stopPropagation={() => goto(`/credits?finish=${story.id}`)}>{inProgress(story) ? 'Finish' : 'Sharpen'} for $6</button>
 								{:else if inProgress(story)}
 									<span class="sb-story-date">last worked on {lastActive(story, $tz)}</span>
 									<button class="sb-continue-btn" on:click|stopPropagation={() => resume(story)}>Continue</button>
@@ -350,10 +351,14 @@
 		}
 	}
 	/* Incomplete sessions are kept (the user paid for them) but shown distinctly. */
-	.sb-story-card.sb-story-incomplete {
-		background: #fdeceb;
-		border-color: #f0b8b2;
-		border-style: dashed;
+	/* Tile color follows STATUS only. The window is a badge + button, never a color. */
+	.sb-story-card.sb-story-inprogress {
+		background: #fff8e6;
+		border: 1px dashed #e6c46a;
+	}
+	.sb-story-card.sb-story-complete {
+		background: #f1f8ee;
+		border: 1px dashed #9ccc8a;
 	}
 	.sb-story-badge {
 		display: inline-block;
@@ -361,20 +366,20 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: #b0392c;
-		background: #fbd9d5;
+		color: #8a5a00;
+		background: #fdecc0;
 		border-radius: 10px;
 		padding: 2px 8px;
 		margin-bottom: 6px;
+		margin-right: 6px;
 	}
-	/* In-progress stories: the resumable ones. */
-	.sb-story-card.sb-story-inprogress {
-		border-color: #f3d9c9;
-		border-style: solid;
+	.sb-badge-ended {
+		color: #666;
+		background: #ececec;
 	}
 	.sb-badge-progress {
-		color: #9a4a2e;
-		background: #fbe7dc;
+		color: #8a5a00;
+		background: #fdecc0;
 	}
 	.sb-continue-btn, .sb-sharpen-btn {
 		border: none;
