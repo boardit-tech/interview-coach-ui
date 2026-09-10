@@ -53,19 +53,3 @@ export async function saveCustomerId(supabase: any, userId: string, customerId: 
     .eq('id', userId);
   if (error) console.error('Failed to save stripe_customer_id:', error.message);
 }
-
-/**
- * Returns true if the user has an active Stripe subscription.
- * Reads Stripe live; with a stored customer id this is a single API call.
- */
-export async function hasActiveSubscription(
-  supabase: any,
-  userId: string,
-  email: string
-): Promise<boolean> {
-  const customerId = await resolveCustomerId(supabase, userId, email);
-  if (!customerId) return false;
-
-  const subs = await stripe.subscriptions.list({ customer: customerId, status: 'active', limit: 1 });
-  return subs.data.length > 0;
-}

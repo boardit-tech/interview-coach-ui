@@ -1,13 +1,18 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
-	import { goto, beforeNavigate, invalidate } from '$app/navigation';
+	import { goto, invalidate } from '$app/navigation';
 	import { userStore } from '$lib/stores/userStore';
-	import { isRefundEligible } from '$lib/refund-policy';
+	import { tz } from '$lib/stores/tz';
 
 	// ── State ──
 	let phase: 'lobby' | 'coaching' | 'loading-report' | 'report' = 'lobby';
 	let sessionId: string | null = null;
+	// STT diagnostics. A session that ends with no turns looks identical whether the
+	// mic was broken or the user simply left — these are what tell them apart. Both
+	// are captured here and sent with /api/end; nothing branches on them yet.
+	let sttError: string | null = null;
+	let sawSpeech = false;
 	let messages: Array<{ role: string; content: string; streaming?: boolean }> = [];
 	let loading = false;
 	let report: any = null;
@@ -18,6 +23,77 @@
 	let starStatus: Record<string, 'green' | 'yellow' | null> = { situation: null, task: null, action: null, result: null };
 	let extractedQuestion: string | null = null;
 	let extractedFlags: Array<{ flag: string; suggestion: string }> | null = null;
+
+	// ── Story (the persistent object a session works on) ──
+	// storyId is what makes resume possible; it lives in the URL (?story=) so a
+	// refresh resumes instead of silently creating a new story.
+	export let data: {
+		resumeStory: { id: string; status: 'in_progress' | 'complete'; question: string | null; green: number; updatedAt: string; expiresAt: string | null; expired: boolean } | null;
+		plan: { storiesLeft: number; poolExpiresAt: string | null; hasAnyPurchase: boolean; allExpired: boolean } | null;
+	};
+	// Why a NEW story can't start, if it can't. Pre-computed from the plan on load
+	// and refreshed from the server's answer on a refused start.
+	let blockedReason: 'no_stories' | 'window_ended' | 'no_purchase' | null = null;
+	$: if (data?.plan && data.plan.storiesLeft === 0) {
+		blockedReason = data.plan.allExpired ? 'window_ended' : data.plan.hasAnyPurchase ? 'no_stories' : 'no_purchase';
+	}
+	const fmtDay = (iso: string, zone?: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: zone });
+	const daysUntil = (iso: string) => Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
+	// The window that governs THIS action: the story's own when resuming, the pool's when starting.
+	$: governingExpiry = resumeStory ? resumeStory.expiresAt : data?.plan?.poolExpiresAt ?? null;
+	$: windowEndsSoon = governingExpiry && daysUntil(governingExpiry) <= 7 && daysUntil(governingExpiry) >= 0 ? governingExpiry : null;
+
+	let storyId: string | null = null;
+	let resumeStoryId: string | null = null;   // read from ?story= on load
+	let lockConflict = false;                  // another tab holds the story (409)
+	let superseded = false;                    // this tab lost the story to another
+	$: resumeStory = resumeStoryId && data?.resumeStory?.id === resumeStoryId ? data.resumeStory : null;
+	let storyStatus: 'in_progress' | 'complete' = 'in_progress';
+	let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
+	function setStoryInUrl(id: string | null) {
+		if (!browser) return;
+		const url = new URL(window.location.href);
+		if (id) url.searchParams.set('story', id); else url.searchParams.delete('story');
+		history.replaceState(history.state, '', url.toString());
+	}
+
+	// Another tab took this story over. Quiet exit: no dialog, no TTS.
+	function handleSuperseded() {
+		if (sessionEnded) return;
+		sessionEnded = true;
+		stopListening();
+		ttsStop();
+		stopHeartbeat();
+		stopIdleWatch();
+		if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+		messages = messages.filter(m => !m.streaming);
+		superseded = true;
+	}
+
+	async function sendHeartbeat() {
+		if (!sessionId || !storyId || sessionEnded || phase !== 'coaching') return;
+		try {
+			const res = await fetch('/storybuilder/api/heartbeat', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ sessionId, storyId }),
+			});
+			if (!res.ok) return;
+			const data = await res.json();
+			if (data.replaced) handleSuperseded();
+		} catch { /* transient — next beat will tell */ }
+	}
+	function startHeartbeat() {
+		stopHeartbeat();
+		heartbeatInterval = setInterval(sendHeartbeat, 30_000);
+	}
+	function stopHeartbeat() {
+		if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
+	}
+	function handleVisibility() {
+		if (document.visibilityState === 'visible') sendHeartbeat();
+	}
 	// Grounded end-of-session summary (per-section talking points + strong/missing,
 	// cited strengths/growth, full story only when all green).
 	let assessment: any = null;
@@ -65,6 +141,59 @@
 	const UNFINISHED_TIMEOUT_MS = 4000; // sounds mid-sentence → send anyway rather than stall
 	const IDLE_CHECKIN_MS = 6000;      // nothing said at all → ask if they're still there
 	const MAX_CHECKINS_PER_TURN = 2;
+
+	// ── Idle close (decided 2026-09-07, timings confirmed 2026-09-08) ──
+	// 3 minutes with nothing from the user → the coach speaks IDLE_LINE and a card
+	// appears. The mic stays live: any speech dismisses the card and is a normal turn.
+	// 10 seconds after the line finishes with no response → the sitting ends through
+	// the normal finalize path and lands on the summary. Deferred while the coach is
+	// speaking or thinking. 3 minutes (not 4) keeps a returning user inside the
+	// prompt-cache TTL.
+	const IDLE_PROMPT_MS = 3 * 60 * 1000;
+	const IDLE_CLOSE_MS = 10 * 1000;
+	const IDLE_LINE = "Still with me? Take your time if you're thinking — or if now's not a good moment, we can wrap this session and pick it up later.";
+	let lastUserActivity = 0;
+	let idleCard = false;
+	let idleWatch: ReturnType<typeof setInterval> | null = null;
+	let idleCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function touchActivity() {
+		lastUserActivity = Date.now();
+		if (idleCard) dismissIdleCard();
+	}
+	function dismissIdleCard() {
+		idleCard = false;
+		if (idleCloseTimer) { clearTimeout(idleCloseTimer); idleCloseTimer = null; }
+	}
+	function handleStillHere() {
+		touchActivity();
+		if (!isSpeaking && !loading && !isListening && phase === 'coaching') startListening();
+	}
+	function startIdleWatch() {
+		stopIdleWatch();
+		lastUserActivity = Date.now();
+		idleWatch = setInterval(() => {
+			if (phase !== 'coaching' || sessionEnded || sessionExpired) return;
+			if (isSpeaking || loading) return;               // defer while the coach is busy
+			if (!idleCard) {
+				if (Date.now() - lastUserActivity >= IDLE_PROMPT_MS) {
+					idleCard = true;
+					ttsSpeak(IDLE_LINE);                          // mic restarts when TTS ends
+				}
+			} else if (!idleCloseTimer) {
+				// The line has finished (isSpeaking is false) — the 10s window starts now.
+				idleCloseTimer = setTimeout(() => {
+					if (!idleCard || sessionEnded) return;
+					dismissIdleCard();
+					handleEnd(true);
+				}, IDLE_CLOSE_MS);
+			}
+		}, 1000);
+	}
+	function stopIdleWatch() {
+		if (idleWatch) { clearInterval(idleWatch); idleWatch = null; }
+		dismissIdleCard();
+	}
 
 	// Trailing words that almost certainly mean the speaker is still going: hesitations,
 	// coordinating conjunctions, and articles/determiners.
@@ -154,6 +283,7 @@
 		// into the buffer, which meant a one-word answer could never be submitted.
 		if (transcript) {
 			checkinCount = 0;
+			touchActivity();
 			sendMessage(transcript);
 		}
 	}
@@ -165,15 +295,10 @@
 		if (checkinCount >= MAX_CHECKINS_PER_TURN) return;
 		if (isSpeaking || loading || sessionExpired) return;
 		checkinCount++;
-		// Second (final) nudge is deliberately a sign-off, not another question: it says
-		// the coach is done prompting, that the clock is still running, and that the user
-		// can simply resume. Going quiet without saying so leaves them wondering whether
-		// the session is still alive.
-		ttsSpeak(
-			checkinCount === 1
-				? 'Still with me?'
-				: "No rush — I'll be here until our time is up. Just start talking whenever you're ready."
-		);
+		// Two quick nudges, then quiet until the 3-minute idle prompt takes over. The
+		// old second line ("I'll be here until our time is up") promised something the
+		// idle close makes untrue.
+		ttsSpeak('Still with me?');
 	}
 
 	function startSilenceTimer() {
@@ -190,10 +315,9 @@
 				unfinishedTimer = setTimeout(endTurn, UNFINISHED_TIMEOUT_MS - SILENCE_TIMEOUT_MS);
 			} else if (checkinCount < MAX_CHECKINS_PER_TURN) {
 				// Nothing said at all — check in instead of sending an empty turn.
-				// After the cap, go quiet: the user may simply have stepped away, and
-				// the 20-minute timer already handles a genuinely abandoned session.
-				// Never auto-finish — they paid for this session, so ending it on their
-				// behalf would spend their credit on a decision they didn't make.
+				// After the cap, go quiet; the 3-minute idle watch (startIdleWatch)
+				// handles a genuinely absent user, and nothing is lost since the
+				// story is resumable.
 				// No re-arm here: speaking the check-in stops recognition, and the
 				// restart afterwards calls startListening(), which arms the timer again.
 				idleTimer = setTimeout(speakCheckIn, IDLE_CHECKIN_MS - SILENCE_TIMEOUT_MS);
@@ -222,6 +346,7 @@
 					interim += event.results[i][0].transcript;
 				}
 			}
+			if (final || interim) touchActivity();
 			if (final) { finalTranscriptBuf += final; startSilenceTimer(); }
 			if (interim) { clearSilenceTimer(); }
 			const display = finalTranscriptBuf + interim;
@@ -230,13 +355,26 @@
 
 		rec.onerror = (event: any) => {
 			if (event.error === 'no-speech' || event.error === 'aborted') {
+				// Benign — mic works and nothing was said, or this is our own restart.
 				if (isActive && phase === 'coaching') {
 					setTimeout(() => { try { recognition?.start(); } catch {} }, 100);
 				}
 				return;
 			}
+			// Everything else was previously discarded here: 'not-allowed' (permission
+			// denied), 'audio-capture' (no mic), 'network' (STT unreachable). Keep the
+			// most recent one — a session usually fails the same way repeatedly, and the
+			// last code is the one that ended it.
+			sttError = event.error || 'unknown';
+			console.warn('[stt-error]', sttError);
 			isListening = false;
 		};
+
+		// Speech reached the browser but produced no transcript — a silent failure that
+		// raises no error at all, so the codes above would miss it entirely. Paired with
+		// a zero-turn session this is strong evidence of STT dropping audio rather than
+		// the user being absent.
+		rec.onspeechstart = () => { sawSpeech = true; };
 
 		rec.onend = () => {
 			isListening = false;
@@ -291,7 +429,7 @@
 		const promise = fetch('/storybuilder/api/tts', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ text }),
+			body: JSON.stringify({ text, sessionId }),
 			signal: controller.signal,
 		}).then(res => { clearTimeout(timeout); return res.ok ? res.blob() : null; })
 		  .catch(() => { clearTimeout(timeout); return null; });
@@ -626,6 +764,8 @@
 							for (const update of event.updates) {
 								starSections = { ...starSections, [update.section]: update.content };
 							}
+						} else if (event.type === 'superseded') {
+							handleSuperseded();
 						} else if (event.type === 'error') {
 							messages = messages.filter(m => !m.streaming).concat([
 								{ role: 'system', content: `Error: ${event.error}` }
@@ -638,8 +778,16 @@
 			// After stream closes, handle session-ending if needed
 			if (finalData?.done) {
 				stopListening();
-				ttsStop();
-				await handleEnd(true);
+				if (finalData.reason === 'off_topic' || finalData.reason === 'switch') {
+					// The coach's closing line is the explanation — let it be heard,
+					// then end. (The 20-min path stops TTS because the client already
+					// spoke its own time-up line.)
+					sessionExpired = true;
+					if (isSpeaking) pendingAutoEnd = true; else await handleEnd(true);
+				} else {
+					ttsStop();
+					await handleEnd(true);
+				}
 			}
 		} catch {
 			messages = messages.filter(m => !m.streaming).concat([
@@ -660,39 +808,67 @@
 	}
 
 	// ── Start session ──
-	async function handleStart() {
+	async function handleStart(takeover = false) {
 		loading = true;
+		lockConflict = false;
 		try {
 			// The start endpoint now handles the credit deduction atomically and
 			// server-side (subscribers are skipped). A session is only created if the
 			// deduction committed, so there's no client-side deduct/refund dance.
-			const interviewRes = await fetch('/storybuilder/api/start', { method: 'POST' });
+			const startBody = (takeover: boolean) => JSON.stringify(
+				resumeStoryId ? { storyId: resumeStoryId, takeover } : {}
+			);
+			const interviewRes = await fetch('/storybuilder/api/start', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: startBody(takeover),
+			});
+
+			// Held by another live tab. The lobby shows a card offering takeover.
+			if (interviewRes.status === 409) {
+				lockConflict = true;
+				loading = false;
+				return;
+			}
 
 			if (!interviewRes.ok) {
 				let errCode = '';
 				try { errCode = (await interviewRes.json()).error; } catch {}
-				if (interviewRes.status === 402 || errCode === 'no_credits') {
-					showToast("You're out of credits — grab more to start a session.", 'error', 8000);
-				} else if (interviewRes.status === 503 || errCode === 'billing_unavailable') {
-					showToast("We couldn't verify your plan just now — no credit was used. Please try again.", 'error', 8000);
+				if (interviewRes.status === 404 || errCode === 'story_not_found') {
+					showToast("We couldn't find that story. Starting fresh instead.", 'error', 8000);
+					resumeStoryId = null;
+					setStoryInUrl(null);
+				} else if (errCode === 'story_expired') {
+					// Window closed past the grace hour — the lobby shows the $6 reopen.
+					if (resumeStory) resumeStory = { ...resumeStory, expired: true };
+				} else if (errCode === 'no_stories' || errCode === 'window_ended' || errCode === 'no_purchase') {
+					blockedReason = errCode;
+				} else if (interviewRes.status === 402) {
+					blockedReason = 'no_purchase';
 				} else {
-					showToast('Something went wrong starting your session — no credit was used. Please try again.', 'error', 8000);
+					showToast('Something went wrong starting your session. Please try again.', 'error', 8000);
 				}
 				loading = false;
 				return;
 			}
 
 			const data = await interviewRes.json();
-			// Server returns the new balance (null for subscribers).
-			if (data.credits !== undefined && data.credits !== null) {
-				$userStore = { ...$userStore, credits: data.credits };
-			}
 			sessionId = data.sessionId;
+			storyId = data.storyId ?? null;
+			storyStatus = data.storyStatus ?? 'in_progress';
+			setStoryInUrl(storyId);
 			startTimeMs = Date.now();
 			remainingTime = 20 * 60 * 1000;
-			starSections = { situation: null, task: null, action: null, result: null } as Record<string, string | null>;
-			starStatus = { situation: null, task: null, action: null, result: null };
+			// Resumed: fill the sidebar from stored state before the first turn.
+			starSections = { situation: null, task: null, action: null, result: null, ...(data.starSections ?? {}) } as Record<string, string | null>;
+			starStatus = { situation: null, task: null, action: null, result: null, ...(data.starStatus ?? {}) };
+			extractedQuestion = data.question ?? null;
+			sessionEnded = false;
+			savedStoryId = null;
 			userConfirmedEnd = false;
+			superseded = false;
+			startHeartbeat();
+			startIdleWatch();
 			const cleanOpening = stripMarkdown(data.message);
 			messages = [{ role: 'interviewer', content: cleanOpening }];
 			phase = 'coaching';
@@ -731,8 +907,8 @@
 			ttsSpeak(cleanOpening);
 		} catch {
 			// Network error before we received a response — the server may or may not
-			// have started (and charged). Don't falsely claim "no credit used".
-			showToast('Something went wrong starting your session. Please refresh and check your credits before retrying.', 'error', 8000);
+			// have started.
+			showToast('Something went wrong starting your session. Please refresh and try again.', 'error', 8000);
 		}
 		loading = false;
 	}
@@ -784,13 +960,16 @@
 				question: assessment.question || null,
 				full_story: assessment.fullStory || null,
 				talking_points: assessment.sections || null,
-				strength_signals: { strengths: assessment.strengths, growth: assessment.growth } || null,
+				strength_signals: (assessment.strengths?.length || assessment.growth?.length)
+					? { strengths: assessment.strengths, growth: assessment.growth }
+					: null,
 				flags: extractedFlags || null,
 				tier: assessment.tier,
 			}),
 		}).then(res => res.json()).then(data => {
 			if (data.saved) {
 				savedStoryId = data.id;
+				if (data.status === 'complete' || data.status === 'in_progress') storyStatus = data.status;
 				// Refresh cached Dashboard/Story Bank data so the new story shows
 				// up without a hard refresh.
 				invalidate('app:stories');
@@ -802,14 +981,13 @@
 	async function handleEnd(auto = false) {
 		if (!auto) {
 			// Subscribers aren't charged per session — don't mention credits to them.
-			const msg = $userStore.subscriptionID
-				? "Are you sure you want to finish? You won't be able to return to this session."
-				: "Are you sure you want to finish? You won't be able to return to this session and the session credit will be used.";
-			if (!confirm(msg)) return;
+			if (!confirm('Finish this session? You can come back to this story any time.')) return;
 		}
 
 		userConfirmedEnd = true;
 		sessionEnded = true;
+		stopHeartbeat();
+		stopIdleWatch();
 		stopListening();
 		ttsStop();
 		if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
@@ -878,7 +1056,7 @@
 		fetch('/storybuilder/api/end', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ sessionId, generateReport: false, starSectionsFilled }),
+			body: JSON.stringify({ sessionId, generateReport: false, starSectionsFilled, sttError, sawSpeech }),
 		}).catch(() => {});
 
 		trySaveStory();
@@ -903,10 +1081,34 @@
 		}).catch(err => console.warn('Failed to log glitch:', err));
 	}
 
+	// Back into the SAME story: the lobby shows what's being resumed (4.6) and the
+	// Start button reads "Continue". Session-level state resets; the story's state
+	// comes back from the server on start.
+	function handleContinueStory() {
+		if (!storyId) return handleBuildAnother();
+		resumeStoryId = storyId;
+		setStoryInUrl(storyId);
+		phase = 'lobby';
+		messages = [];
+		sessionId = null;
+		report = null;
+		assessment = null;
+		userConfirmedEnd = false;
+		sessionExpired = false;
+		pendingAutoEnd = false;
+		extractedFlags = null;
+		ttsStop();
+	}
+
 	function handleBuildAnother() {
 		phase = 'lobby';
 		messages = [];
 		sessionId = null;
+		storyId = null;
+		resumeStoryId = null;
+		setStoryInUrl(null);
+		sessionExpired = false;
+		pendingAutoEnd = false;
 		report = null;
 		assessment = null;
 		userConfirmedEnd = false;
@@ -977,97 +1179,21 @@
 		{ key: 'result', label: 'Result' }
 	];
 
-	// ── Credits check ──
-	$: noCredits = $userStore.credits === 0 && !$userStore.subscriptionID && !loading;
 
-	function reportAbandon() {
-		if (!sessionId || sessionEnded || phase !== 'coaching') return;
-		const durationMs = startTimeMs ? Date.now() - startTimeMs : 0;
-		const starSectionsFilled = Object.values(starSections).filter(Boolean).length;
-		const payload = JSON.stringify({ sessionId, durationMs, starSectionsFilled });
-		navigator.sendBeacon('/storybuilder/api/abandon', new Blob([payload], { type: 'application/json' }));
-	}
-
-	// Hard browser unload (close tab, refresh, external link)
-	function handleBeforeUnload() {
-		reportAbandon();
-	}
-
-	// In-app SvelteKit navigation (e.g. clicking the logo back to Dashboard) —
-	// beforeunload does NOT fire for client-side route changes, so catch those here.
-	// Confirm first to prevent accidental loss of an active session, with a message
-	// that truthfully reflects the refund outcome (same threshold the server uses).
-	let leavingHandled = false;
-	beforeNavigate((nav) => {
-		// Set once we've confirmed and kicked off the abandon, so the follow-up
-		// goto() isn't intercepted and re-prompted.
-		if (leavingHandled) return;
-		if (!sessionId || sessionEnded || phase !== 'coaching') return;
-		const durationMs = startTimeMs ? Date.now() - startTimeMs : 0;
-		const sections = Object.values(starSections).filter(Boolean).length;
-		const subscriber = !!$userStore.subscriptionID;
-		const eligible = !subscriber && isRefundEligible(durationMs, sections);
-
-		let msg: string;
-		if (subscriber) {
-			msg = 'Leave this session? Your in-progress story will be discarded.';
-		} else if (eligible) {
-			msg = "Leave now? Since you're just getting started, your credit will be refunded.";
-		} else {
-			msg = 'Leave now? Your credit will be used and this in-progress story will be discarded.';
-		}
-
-		if (!confirm(msg)) {
-			nav.cancel();
-			return;
-		}
-
-		// For an in-app navigation we can wait: cancel, finish the refund, then go.
-		// A fire-and-forget beacon would race the destination's server load, which
-		// reads the balance straight from the DB — so the next page could render a
-		// pre-refund number until a manual refresh.
-		const target = nav.to?.url;
-		if (target && nav.type !== 'leave') {
-			nav.cancel();
-			leavingHandled = true;
-			sessionEnded = true;
-			stopListening();
-			ttsStop();
-			finishAbandon(target.pathname + target.search);
-			return;
-		}
-
-		// Uncontrolled exit (tab close): can't await, fall back to the beacon.
-		reportAbandon();
-	});
-
-	// Report the abandon, wait for the refund to commit, then navigate — so the
-	// destination's load reads the updated balance.
-	async function finishAbandon(href: string) {
-		const durationMs = startTimeMs ? Date.now() - startTimeMs : 0;
-		const starSectionsFilled = Object.values(starSections).filter(Boolean).length;
-		try {
-			const res = await fetch('/storybuilder/api/abandon', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ sessionId, durationMs, starSectionsFilled }),
-			});
-			if (res.ok) {
-				const data = await res.json();
-				if (typeof data.credits === 'number') {
-					$userStore = { ...$userStore, credits: data.credits };
-				}
-			}
-		} catch { /* best effort — balance still settles on the next load */ }
-		await goto(href, { invalidateAll: true });
-	}
+	// The abandon beacon is gone (decided 2026-08-19). It never fired on crashes,
+	// OS kills, or dead batteries — exactly when it mattered — and everything it
+	// decided is now derived server-side: turns persist per turn, and a sitting that
+	// died without reporting is marked 'abandoned' when its story is next resumed.
+	// Leaving the page mid-session loses nothing; the story is resumable from the
+	// Story Bank or the ?story= URL.
 
 	onMount(() => {
 		const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 		browserSupported = !!SR;
 		window.addEventListener('mousemove', handleMouseMove);
 		window.addEventListener('mouseup', handleMouseUp);
-		window.addEventListener('beforeunload', handleBeforeUnload);
+		document.addEventListener('visibilitychange', handleVisibility);
+		resumeStoryId = new URLSearchParams(window.location.search).get('story');
 	});
 
 	onDestroy(() => {
@@ -1078,7 +1204,9 @@
 		if (timerInterval) clearInterval(timerInterval);
 		window.removeEventListener('mousemove', handleMouseMove);
 		window.removeEventListener('mouseup', handleMouseUp);
-		window.removeEventListener('beforeunload', handleBeforeUnload);
+		document.removeEventListener('visibilitychange', handleVisibility);
+		stopHeartbeat();
+		stopIdleWatch();
 	});
 </script>
 
@@ -1115,10 +1243,72 @@
 	</div>
 	<div class="sb-container">
 		<div class="sb-lobby">
-			{#if noCredits}
-				<div class="sb-no-credits">
-					<p>Uh oh, looks like you're out of credits. Please buy more before continuing.</p>
-					<button class="sb-start-btn" on:click={() => goto('/credits')}>Buy Credits</button>
+			{#if resumeStory?.expired}
+				<div class="sb-lobby-icon">&#x23F3;</div>
+				<h1>This story's build window has ended</h1>
+				<div class="sb-lobby-resume">
+					<span class="sb-lobby-resume-label">{resumeStory.status === 'complete' ? 'Complete' : `${resumeStory.green} of 4 sections solid`}</span>
+					<p class="sb-lobby-resume-q" class:untitled={!resumeStory.question}>
+						{resumeStory.question || 'Question not settled yet'}
+					</p>
+				</div>
+				<p class="sb-lobby-note">
+					Everything you built is saved and yours to keep. To keep working on it, reopen it for another 30 days.
+				</p>
+				<div class="sb-lobby-actions">
+					<a href="/credits?finish={resumeStory.id}" class="sb-start-btn sb-overlay-btn">Finish this story for $6</a>
+					<a href="/stories" class="sb-start-btn sb-start-btn-secondary sb-overlay-btn">Back to my stories</a>
+				</div>
+			{:else if blockedReason && !resumeStory}
+				<div class="sb-lobby-icon">&#x1F4DA;</div>
+				{#if blockedReason === 'no_stories'}
+					<h1>You've used every story in your bundle</h1>
+					<p class="sb-lobby-note">Nice work. Get another 15 to keep building, or add a single story.</p>
+				{:else if blockedReason === 'window_ended'}
+					<h1>Your build window has ended</h1>
+					<p class="sb-lobby-note">Your stories are yours to keep. To build more, start a new bundle or add a single story.</p>
+				{:else}
+					<h1>Start your first interview-ready story</h1>
+					<p class="sb-lobby-note">Pick a plan and your coach will take it from there.</p>
+				{/if}
+				<div class="sb-lobby-actions">
+					<a href="/credits" class="sb-start-btn sb-overlay-btn">See plans</a>
+					<a href="/stories" class="sb-start-btn sb-start-btn-secondary sb-overlay-btn">My Story Bank</a>
+				</div>
+			{:else if lockConflict}
+				<div class="sb-lobby-icon">&#x1F5D7;</div>
+				<h2>This story is open in another window</h2>
+				<p class="sb-lobby-note">Continue here instead? The other window will stop, and nothing is lost — every turn is saved as you go.</p>
+				<div class="sb-lobby-actions">
+					<button class="sb-start-btn" on:click={() => handleStart(true)} disabled={loading}>
+						{loading ? 'Starting...' : 'Continue here'}
+					</button>
+					<button class="sb-start-btn sb-start-btn-secondary" on:click={() => (lockConflict = false)}>Never mind</button>
+				</div>
+			{:else if resumeStory}
+				<div class="sb-lobby-icon">&#x1F501;</div>
+				<h1>{resumeStory.status === 'complete' ? 'Sharpen your story' : 'Pick up where you left off'}</h1>
+				<div class="sb-lobby-resume">
+					<span class="sb-lobby-resume-label">{resumeStory.status === 'complete' ? 'Complete' : `${resumeStory.green} of 4 sections solid`}</span>
+					<p class="sb-lobby-resume-q" class:untitled={!resumeStory.question}>
+						{resumeStory.question || 'Question not settled yet'}
+					</p>
+				</div>
+				<div class="sb-lobby-tips" style="margin-top: 0;">
+					<h3>Another focused 20 minutes</h3>
+					<p style="color: #555; font-size: 0.9rem; margin-bottom: 0;">
+						Your coach remembers everything from before and will {resumeStory.status === 'complete' ? 'follow your lead on what to tighten up' : 'pick up at the next section'}.
+						Continuing a story never uses a story from your plan.
+					</p>
+				</div>
+				{#if windowEndsSoon}
+					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon, $tz)}.</p>
+				{/if}
+				<div class="sb-lobby-actions">
+					<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
+						{loading ? 'Starting...' : resumeStory.status === 'complete' ? 'Sharpen this story' : 'Continue story'}
+					</button>
+					<button class="sb-start-btn sb-start-btn-secondary" on:click={handleBuildAnother}>Start a new story instead</button>
 				</div>
 			{:else}
 				<div class="sb-lobby-icon">&#10024;</div>
@@ -1127,10 +1317,11 @@
 				<div class="sb-lobby-tips">
 					<h3>How it works</h3>
 					<ul>
-						<li>Tell your coach what type of questions you want to practice. Clarify as needed.</li>
+						<li>Tell your coach what question you want to practice. Clarify as needed.</li>
 						<li>Share a rough experience from your work. <strong>Feel free to ramble here!</strong></li>
-						<li>Your coach will ask insightful questions to extract the key details.</li>
+						<li>Your coach asks insightful questions to extract the key details.</li>
 						<li>Together you shape it into a Situation, Task, Action, Result story.</li>
+						<li>Each session is a focused 20 minutes. Come back as many times as the story needs, and your coach remembers everything.</li>
 						<li>Walk away with a ready-to-use interview answer, plus talking points.</li>
 					</ul>
 				</div>
@@ -1142,12 +1333,13 @@
 						You can click on the text wall to interrupt at any time.
 					</p>
 				</div>
-				{#if !$userStore.subscriptionID}
-					<p style="text-align: center; color: #888; font-size: 0.85rem;">
-						One credit will be deducted once you begin.
-					</p>
+				{#if windowEndsSoon}
+					<p class="sb-lobby-window">Your build window ends {fmtDay(windowEndsSoon, $tz)}.</p>
 				{/if}
-				<button class="sb-start-btn" on:click={handleStart} disabled={loading}>
+				{#if data?.plan && data.plan.storiesLeft > 0 && data.plan.storiesLeft <= 3}
+					<p class="sb-lobby-left">{data.plan.storiesLeft} {data.plan.storiesLeft === 1 ? 'story' : 'stories'} left on your plan</p>
+				{/if}
+				<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
 					{loading ? 'Starting...' : 'Start Building'}
 				</button>
 			{/if}
@@ -1336,8 +1528,15 @@
 
 			{#if !report?.error && assessment}
 				<div class="sb-scorecard-actions">
-					<button class="sb-start-btn" on:click={handleBuildAnother}>Build another story</button>
-					<a href="/dashboard" class="sb-error-dashboard-link">Back to Dashboard</a>
+					{#if storyId}
+						<button class="sb-start-btn" on:click={handleContinueStory}>
+							{storyStatus === 'complete' ? 'Sharpen this story' : 'Continue this story'}
+						</button>
+						<button class="sb-start-btn sb-start-btn-secondary" on:click={handleBuildAnother}>Start a new story</button>
+					{:else}
+						<button class="sb-start-btn" on:click={handleBuildAnother}>Build another story</button>
+					{/if}
+					<a href="/stories" class="sb-error-dashboard-link">My Story Bank</a>
 				</div>
 			{/if}
 		</div>
@@ -1349,6 +1548,19 @@
 		<div class="sb-coaching-main">
 			<!-- ══════ CALL VIEW ══════ -->
 				<div class="sb-call-view">
+					{#if idleCard && !superseded}
+						<div class="sb-idle-card" role="status">
+							<p>Still there? This session will wrap up on its own in a moment — your progress is saved either way.</p>
+							<button class="sb-start-btn" on:click={handleStillHere}>I'm still here</button>
+						</div>
+					{/if}
+					{#if superseded}
+						<div class="sb-overlay-card" role="status">
+							<h3>This story is open in another window</h3>
+							<p>This session ended here so the two don't talk over each other. Everything you said is saved.</p>
+							<a href="/stories" class="sb-start-btn sb-overlay-btn">Back to my stories</a>
+						</div>
+					{/if}
 					<!-- Call status area -->
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -1590,6 +1802,81 @@
 	.sb-start-btn:hover { background: #b5593a; transform: translateY(-1px); }
 	.sb-start-btn:active { transform: translateY(0); }
 	.sb-start-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+	.sb-lobby-note { color: #555; font-size: 0.95rem; max-width: 420px; margin: 0 auto 20px; }
+	.sb-lobby-window {
+		display: inline-block;
+		background: #fff6e5;
+		color: #8a5a00;
+		border-radius: 10px;
+		padding: 6px 12px;
+		font-size: 0.85rem;
+		margin: 0 0 12px;
+	}
+	.sb-lobby-left { color: #888; font-size: 0.85rem; text-align: center; margin: 0 0 8px; }
+	.sb-lobby-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+	.sb-lobby-resume {
+		background: white;
+		border: 1px solid #f3d9c9;
+		border-radius: 14px;
+		padding: 16px 20px;
+		margin: 12px auto 20px;
+		max-width: 520px;
+		text-align: left;
+	}
+	.sb-lobby-resume-label {
+		display: inline-block;
+		font-size: 0.68rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: #9a4a2e;
+		background: #fbe7dc;
+		border-radius: 10px;
+		padding: 2px 8px;
+		margin-bottom: 6px;
+	}
+	.sb-lobby-resume-q { margin: 0; font-weight: 600; color: #2d2d2d; }
+	.sb-lobby-resume-q.untitled { font-style: italic; color: #999; font-weight: 400; }
+	.sb-overlay-card {
+		position: absolute;
+		inset: 0;
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		padding: 32px;
+		background: rgba(250, 247, 242, 0.96);
+		h3 { margin: 0 0 8px; font-size: 1.15rem; color: #2d2d2d; }
+		p { margin: 0 0 18px; color: #555; max-width: 420px; }
+	}
+	.sb-overlay-btn { text-decoration: none; display: inline-block; }
+	.sb-idle-card {
+		position: absolute;
+		left: 50%;
+		bottom: 24px;
+		transform: translateX(-50%);
+		z-index: 4;
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		padding: 14px 18px;
+		background: white;
+		border: 1px solid #f3d9c9;
+		border-radius: 14px;
+		box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+		max-width: min(560px, calc(100% - 32px));
+		p { margin: 0; font-size: 0.9rem; color: #444; }
+		.sb-start-btn { padding: 9px 20px; font-size: 0.9rem; white-space: nowrap; }
+		@media (max-width: 600px) { flex-direction: column; text-align: center; }
+	}
+	.sb-start-btn-secondary {
+		background: transparent;
+		color: #c96442;
+		border: 1px solid #c96442;
+	}
+	.sb-start-btn-secondary:hover { background: #fbe7dc; }
 
 	/* ── Coaching Layout ── */
 	.sb-coaching-layout {
@@ -1656,6 +1943,7 @@
 
 	/* ── Call View (voice mode) ── */
 	.sb-call-view {
+		position: relative; /* anchors the superseded overlay card */
 		display: flex;
 		flex-direction: column;
 		height: 100%;

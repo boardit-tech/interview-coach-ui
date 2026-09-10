@@ -1,5 +1,5 @@
 import type { RequestHandler } from './$types';
-import { handleUserMessageStream } from '$lib/server/interview';
+import { handleUserMessageStream, SupersededError } from '$lib/server/interview';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
   const session = await locals.getSession();
@@ -35,6 +35,15 @@ export const POST: RequestHandler = async ({ locals, request }) => {
         try {
           await handleUserMessageStream(sessionId, message, writer, locals.supabase);
         } catch (err: any) {
+          if (err instanceof SupersededError) {
+            // Not a failure: another tab took this story over. The client ends
+            // itself quietly (in-page card, no dialog, no TTS).
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ type: 'superseded', heldBy: err.heldBy })}\n\n`)
+            );
+            controller.close();
+            return;
+          }
           console.error('Error streaming message:', err);
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`)

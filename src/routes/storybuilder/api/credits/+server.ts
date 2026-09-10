@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 
-// NOTE: The primary deduct/refund flow now lives in /api/start and /api/abandon,
+// NOTE: The primary deduct flow now lives in /api/start (a credit per STORY),
 // which call the atomic deduct_credit / refund_credit RPCs directly. This endpoint
 // remains for any direct/manual use and is kept atomic + error-checked for safety.
 export const POST: RequestHandler = async ({ locals, request }) => {

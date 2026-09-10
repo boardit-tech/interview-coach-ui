@@ -3,59 +3,123 @@ import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad, Actions } from './$types';
 
 import {
-    VITE_STRIPE_ID_ALA_CARTE,
-    VITE_STRIPE_ID_SUBSCRIPTION,
+    VITE_STRIPE_ID_60_DAY_BUNDLE,
+    VITE_STRIPE_ID_SINGLE_STORY,
+    VITE_STRIPE_ID_FINISH_STORY,
 } from '$env/static/private';
 import { resolveCustomerId } from '$lib/server/billing';
 
+// One-time purchases only for individuals (decided 2026-09-08). The monthly
+// subscription is gone from this page; the Stripe subscription CHECK stays in
+// /api/start as the seed of future coach seats.
+export type Kind = 'bundle' | 'single_story' | 'finish_story';
+
 export type Choice = {
-    type: 'subscription' | 'payment';
-    sku: string;
+    kind: Kind;
     price: number;
+    compareAt?: number;   // crossed-out list price (early-bird display)
     label: string;
     description: string;
     features: string[];
     stripeID: string;
-    credits: number;
+    storiesAllowed: number;
 };
 
 const stripe = new Stripe(import.meta.env['VITE_STRIPE_SECRET_KEY'], {
     apiVersion: '2023-08-16',
 });
 
-const offerings: Array<Choice> = [
-    {
-        type: 'payment',
-        sku: 'alacarte',
-        price: 3,
-        label: 'Single Session',
-        description: '20-min STAR story construction with the AI coach',
+const OFFERINGS: Record<Kind, Choice> = {
+    bundle: {
+        kind: 'bundle',
+        price: 89,
+        compareAt: 109,
+        label: '60-day story bundle',
+        description: 'Up to 15 interview-ready stories within 60 days of purchase.',
         features: [
-            'Relaxing conversations for rambling out project details.',
-            'Ending wth an interview-competitive narrative',
-            'Polished details saved to your Story Bank, forever accessible',
+            'Unlimited coaching sessions per story',
+            'Every story saved to your Story Bank, yours to keep',
+            'Come back any time to sharpen a finished story',
         ],
-        credits: 1,
-        stripeID: VITE_STRIPE_ID_ALA_CARTE,
+        storiesAllowed: 15,
+        stripeID: VITE_STRIPE_ID_60_DAY_BUNDLE,
     },
-    {
-        type: 'subscription',
-        sku: 'subscription',
-        price: 30,
-        label: 'Monthly Unlimited',
-        description: 'Unlimited story building sessions. Billed monthly.',
+    single_story: {
+        kind: 'single_story',
+        price: 9,
+        label: 'Single story',
+        description: 'One interview-ready story for one question, within 30 days of purchase.',
         features: [
-            'Same single-session benefits',
-            'Unlimited sessions per month',
-            'Cancel anytime',
+            'Unlimited coaching sessions to complete it',
+            'Saved to your Story Bank, yours to keep',
         ],
-        credits: 0,
-        stripeID: VITE_STRIPE_ID_SUBSCRIPTION,
+        storiesAllowed: 1,
+        stripeID: VITE_STRIPE_ID_SINGLE_STORY,
     },
-];
+    // Never listed. Offered only from an expired in-progress story (lobby and
+    // Story Bank card), and bound to that story at purchase.
+    finish_story: {
+        kind: 'finish_story',
+        price: 6,
+        label: 'Finish this story',
+        description: 'Reopen one story you already started, for another 30 days.',
+        features: ['Unlimited sessions to finish it'],
+        storiesAllowed: 1,
+        stripeID: VITE_STRIPE_ID_FINISH_STORY,
+    },
+};
 
-export const load: PageServerLoad = async () => {
-    return { offerings };
+export const load: PageServerLoad = async ({ locals, url }) => {
+    const session = await locals.getSession();
+    const finishStoryId = url.searchParams.get('finish');
+
+    // "Your plan": every purchase with its usage, plus any legacy credits.
+    let plan: Array<{
+        id: string; kind: Kind; source: string; storiesAllowed: number; used: number;
+        expiresAt: string; expired: boolean; revoked: boolean; forStory: string | null; note: string | null;
+    }> = [];
+    let finishStory: { id: string; question: string | null } | null = null;
+
+    if (session) {
+        const [{ data: purchases }, { data: consumptions }] = await Promise.all([
+            locals.supabase
+                .from('purchases')
+                .select('id, kind, source, stories_allowed, expires_at, revoked_at, for_story_id, note')
+                .order('expires_at', { ascending: true }),
+            locals.supabase.from('story_consumptions').select('purchase_id'),
+        ]);
+        const used = new Map<string, number>();
+        for (const c of consumptions ?? []) used.set(c.purchase_id, (used.get(c.purchase_id) ?? 0) + 1);
+        const now = Date.now();
+        plan = (purchases ?? []).map((p: any) => ({
+            id: p.id,
+            kind: p.kind,
+            source: p.source,
+            storiesAllowed: p.stories_allowed,
+            used: used.get(p.id) ?? 0,
+            expiresAt: p.expires_at,
+            expired: new Date(p.expires_at).getTime() <= now,
+            revoked: !!p.revoked_at,
+            forStory: p.for_story_id,
+            note: p.note,
+        }));
+
+        if (finishStoryId) {
+            const { data: s } = await locals.supabase
+                .from('stories')
+                .select('id, question, extracted_question')
+                .eq('id', finishStoryId)
+                .single();
+            if (s) finishStory = { id: s.id, question: s.question || s.extracted_question || null };
+        }
+    }
+
+    return {
+        offerings: [OFFERINGS.bundle, OFFERINGS.single_story],
+        finishOffering: OFFERINGS.finish_story,
+        finishStory,
+        plan,
+    };
 };
 
 export const actions: Actions = {
@@ -65,55 +129,42 @@ export const actions: Actions = {
             throw redirect(301, '/login');
         }
 
-        const rawData = await request.formData();
-        const chosenOffering = rawData.get('chosenOffering');
+        const form = await request.formData();
+        const kind = form.get('kind')?.toString() as Kind | undefined;
+        const forStoryId = form.get('forStoryId')?.toString() || null;
+        if (!kind || !OFFERINGS[kind]) throw redirect(303, '/credits');
+        if ((kind === 'finish_story') !== !!forStoryId) throw redirect(303, '/credits');
 
-        if (chosenOffering) {
-            const chosen = JSON.parse(chosenOffering.toString()) as Choice;
-            const baseUrl = url.origin;
+        const chosen = OFFERINGS[kind];
+        const baseUrl = url.origin;
 
-            // Reuse this user's existing Stripe customer when we know it. Passing
-            // customer_email instead creates a NEW customer on every checkout, which
-            // produces duplicates that break subscription lookups.
-            const existingCustomerId = await resolveCustomerId(
-                locals.supabase,
-                session.user.id,
-                session.user.email || ''
-            );
+        // Reuse this user's existing Stripe customer when we know it. Passing
+        // customer_email instead creates a NEW customer on every checkout, which
+        // produces duplicates that break subscription lookups.
+        const existingCustomerId = await resolveCustomerId(
+            locals.supabase,
+            session.user.id,
+            session.user.email || ''
+        );
 
-            const checkoutSession = await stripe.checkout.sessions.create({
-                line_items: [
-                    {
-                        price: chosen.stripeID,
-                        quantity: 1,
-                    },
-                ],
-                mode: chosen.type,
-                success_url: `${baseUrl}/credits/success?session_id={CHECKOUT_SESSION_ID}`,
-                cancel_url: `${baseUrl}/credits`,
-                // Renders the "Add promotion code" field. This is the only way to enable
-                // it for a Checkout Session — the dashboard toggle only applies to
-                // Payment Links, which this flow doesn't use. Mutually exclusive with
-                // `discounts` (applying a code programmatically).
-                allow_promotion_codes: true,
-                // Reuse the known customer, else create one. In payment mode Stripe
-                // defaults to customer_creation: 'if_required', which creates NO
-                // Customer for a one-off purchase — so we ask for one explicitly,
-                // otherwise there's no id to store. (Subscription mode always makes one,
-                // and rejects the customer_creation param.)
-                ...(existingCustomerId
-                    ? { customer: existingCustomerId }
-                    : {
-                        customer_email: session.user.email,
-                        ...(chosen.type === 'payment' ? { customer_creation: 'always' as const } : {}),
-                    }),
-                metadata: {
-                    credits: chosen.credits.toString(),
-                    user_id: session.user.id,
-                },
-            });
+        const checkoutSession = await stripe.checkout.sessions.create({
+            line_items: [{ price: chosen.stripeID, quantity: 1 }],
+            mode: 'payment',
+            success_url: `${baseUrl}/credits/success?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: forStoryId ? `${baseUrl}/storybuilder?story=${forStoryId}` : `${baseUrl}/credits`,
+            allow_promotion_codes: true,
+            ...(existingCustomerId
+                ? { customer: existingCustomerId }
+                : { customer_email: session.user.email, customer_creation: 'always' as const }),
+            // Everything the success handler needs, from Stripe — never from the URL.
+            metadata: {
+                user_id: session.user.id,
+                kind: chosen.kind,
+                stories_allowed: String(chosen.storiesAllowed),
+                for_story_id: forStoryId ?? '',
+            },
+        });
 
-            throw redirect(303, checkoutSession.url || '/credits');
-        }
+        throw redirect(303, checkoutSession.url || '/credits');
     },
 };

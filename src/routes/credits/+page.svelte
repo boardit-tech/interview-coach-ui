@@ -1,18 +1,28 @@
 <script lang="ts">
 	import { userStore } from '$lib/stores/userStore';
+	import { tz } from '$lib/stores/tz';
 
 	export let data;
 
 	const offerings = data.offerings;
+	$: plan = data.plan ?? [];
+	$: active = plan.filter(p => !p.expired && !p.revoked);
+	$: past = plan.filter(p => p.expired || p.revoked);
 
-	const initPurchase = (sku: string) => {
-		if (document) {
-			const form = document.getElementById(sku);
-			if (form && form instanceof HTMLFormElement) {
-				form.submit();
-			}
-		}
+	const submit = (id: string) => {
+		const form = document.getElementById(id);
+		if (form instanceof HTMLFormElement) form.submit();
 	};
+
+	const fmtDate = (iso: string, zone?: string) =>
+		new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: zone });
+	const kindLabel = (p: any) =>
+		p.kind === 'bundle' ? '60-day story bundle'
+		: p.kind === 'finish_story' ? 'Finish this story'
+		: p.source === 'trial' ? 'Welcome story'
+		: 'Single story';
+	const usage = (p: any) =>
+		p.kind === 'finish_story' ? '' : `${p.used} of ${p.storiesAllowed} used`;
 </script>
 
 <div class="credits-page">
@@ -21,45 +31,86 @@
 	</div>
 	<div class="credits-inner">
 
-		{#if $userStore.subscriptionID}
+		{#if data.finishStory}
+			<!-- Reached only from an expired in-progress story. -->
 			<div class="credits-header">
-				<h1>You're on Monthly Unlimited</h1>
-				<p class="credits-subtitle">You currently have unlimited coaching sessions.</p>
+				<h1>Finish this story</h1>
+				<p class="credits-subtitle">Its build window has ended. Reopen it for another 30 days and pick up right where you left off.</p>
 			</div>
+			<div class="credits-cards credits-cards-single">
+				<button class="credits-card credits-card-featured" on:click={() => submit('finish')}>
+					<form id="finish" action="?/purchase" method="POST">
+						<input type="hidden" name="kind" value="finish_story" />
+						<input type="hidden" name="forStoryId" value={data.finishStory.id} />
+					</form>
+					<div class="credits-card-top">
+						<h2>{data.finishOffering.label}</h2>
+						<p class="credits-desc" class:untitled={!data.finishStory.question}>
+							{data.finishStory.question || 'Untitled story'}
+						</p>
+					</div>
+					<div class="credits-price">
+						<span class="credits-amount">${data.finishOffering.price}</span>
+					</div>
+					<div class="credits-divider"></div>
+					<ul class="credits-features">
+						{#each data.finishOffering.features as feature}
+							<li><span class="credits-check">✓</span> {feature}</li>
+						{/each}
+						<li><span class="credits-check">✓</span> Everything already built stays exactly as it is</li>
+					</ul>
+					<div class="credits-card-cta">Reopen for ${data.finishOffering.price}</div>
+				</button>
+			</div>
+			<p class="credits-fineprint">Non-refundable. By placing the order, you agree to the terms of service.</p>
 
-			<div class="credits-active">
-				<div class="credits-active-top">
-					<span class="credits-active-badge">Active</span>
-					<span>Monthly Unlimited — $30/month</span>
-				</div>
-				{#if data.subscriptionRenewAt}
-					<span class="credits-renew">Renews on {data.subscriptionRenewAt}</span>
+		{:else}
+
+			<div class="credits-header">
+				<h1>Your plan</h1>
+				{#if active.length === 0}
+					<p class="credits-subtitle">No stories on your plan right now. Pick one below to start building.</p>
+				{:else}
+					<p class="credits-subtitle">Everything you can build with, and when each window ends.</p>
 				{/if}
 			</div>
 
-			<a href="/credits/api/portal" class="credits-manage-link">Cancel subscription &rarr;</a>
-		{:else}
-			<div class="credits-header">
-				<h1>Get Interview Credits</h1>
-				<p class="credits-subtitle">Choose a plan that works for you.</p>
-			</div>
+			{#if active.length > 0}
+				<div class="credits-plan">
+					{#each active as p}
+						<div class="credits-plan-row">
+							<div>
+								<span class="credits-plan-kind">{kindLabel(p)}</span>
+								{#if usage(p)}<span class="credits-plan-usage">{usage(p)}</span>{/if}
+							</div>
+							<span class="credits-plan-ends">ends {fmtDate(p.expiresAt, $tz)}</span>
+						</div>
+					{/each}
+				</div>
+			{/if}
 
+			<div class="credits-header credits-header-more">
+				<h2>Get more stories</h2>
+				<p class="credits-subtitle">Every plan has a window on purpose: you buy at your motivation peak, and a deadline keeps it there. Stories you finish are yours forever.</p>
+			</div>
 			<div class="credits-cards">
 				{#each offerings as offering}
-					<button class="credits-card" class:credits-card-featured={offering.type === 'subscription'} on:click={() => initPurchase(offering.sku)}>
-						<form id={offering.sku} action="?/purchase" method="POST">
-							<input type="hidden" name="chosenOffering" value={JSON.stringify(offering)} />
+					<button class="credits-card" class:credits-card-featured={offering.kind === 'bundle'} on:click={() => submit(offering.kind)}>
+						<form id={offering.kind} action="?/purchase" method="POST">
+							<input type="hidden" name="kind" value={offering.kind} />
 						</form>
-						{#if offering.type === 'subscription'}
-							<span class="credits-badge">Best Value</span>
+						{#if offering.compareAt}
+							<span class="credits-badge">Early bird</span>
 						{/if}
 						<div class="credits-card-top">
 							<h2>{offering.label}</h2>
 							<p class="credits-desc">{offering.description}</p>
 						</div>
 						<div class="credits-price">
+							{#if offering.compareAt}
+								<span class="credits-compare">${offering.compareAt}</span>
+							{/if}
 							<span class="credits-amount">${offering.price}</span>
-							<span class="credits-period">{offering.type === 'subscription' ? '/month' : ''}</span>
 						</div>
 						<div class="credits-divider"></div>
 						<ul class="credits-features">
@@ -67,15 +118,26 @@
 								<li><span class="credits-check">✓</span> {feature}</li>
 							{/each}
 						</ul>
-						{#if offering.type === 'subscription'}
-							<p class="credits-cancel-note">Cancel anytime. Access continues through the end of billing period — no partial refunds.</p>
-						{/if}
-						<div class="credits-card-cta">
-							{offering.type === 'subscription' ? 'Subscribe Now' : 'Buy Now'}
-						</div>
+						<div class="credits-card-cta">Buy now</div>
 					</button>
 				{/each}
 			</div>
+			<p class="credits-fineprint">Windows count from the day of purchase. Non-refundable. By placing the order, you agree to the terms of service.</p>
+
+			{#if past.length > 0}
+				<details class="credits-past">
+					<summary>Past purchases</summary>
+					{#each past as p}
+						<div class="credits-plan-row credits-plan-row-past">
+							<div>
+								<span class="credits-plan-kind">{kindLabel(p)}</span>
+								{#if usage(p)}<span class="credits-plan-usage">{usage(p)}</span>{/if}
+							</div>
+							<span class="credits-plan-ends">{p.revoked ? 'refunded' : `ended ${fmtDate(p.expiresAt, $tz)}`}</span>
+						</div>
+					{/each}
+				</details>
+			{/if}
 		{/if}
 	</div>
 </div>
@@ -135,6 +197,50 @@
 		gap: 24px;
 		margin-top: 8px;
 	}
+	.credits-compare {
+		font-size: 1.4rem;
+		color: #aaa;
+		text-decoration: line-through;
+		margin-right: 10px;
+		vertical-align: baseline;
+	}
+	.credits-cards-single {
+		grid-template-columns: minmax(0, 460px);
+		justify-content: center;
+	}
+	.credits-header-more {
+		margin-top: 40px;
+		margin-bottom: 16px;
+		h2 { font-size: 1.25rem; font-weight: 700; color: $text-dark; margin: 0 0 6px; }
+	}
+	.credits-active { margin-bottom: 32px; }
+	.credits-plan {
+		background: white;
+		border: 1px solid #f3d9c9;
+		border-radius: 14px;
+		padding: 4px 20px;
+		margin-top: 16px;
+	}
+	.credits-plan-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 16px;
+		padding: 14px 0;
+		border-bottom: 1px solid #f0ece6;
+		&:last-child { border-bottom: none; }
+	}
+	.credits-plan-row-past { opacity: 0.7; }
+	.credits-plan-kind { display: block; font-weight: 600; color: $text-dark; }
+	.credits-plan-usage { display: block; font-size: 0.85rem; color: $text-light; margin-top: 2px; }
+	.credits-plan-ends { font-size: 0.85rem; color: $text-light; white-space: nowrap; }
+	.credits-fineprint { font-size: 0.8rem; color: #999; margin: 16px 0 0; text-align: center; }
+	.credits-past {
+		margin-top: 32px;
+		summary { cursor: pointer; font-size: 0.9rem; color: $text-light; }
+		.credits-plan-row { padding: 10px 0; }
+	}
+	.credits-desc.untitled { font-style: italic; color: #999; }
 
 	.credits-card {
 		position: relative;

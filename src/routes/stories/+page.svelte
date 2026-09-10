@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { tz } from '$lib/stores/tz';
 
 	export let data;
 
@@ -11,12 +12,13 @@
 		expandedId = expandedId === id ? null : id;
 	};
 
-	const formatDate = (dateStr: string) => {
+	const formatDate = (dateStr: string, zone?: string) => {
 		const d = new Date(dateStr);
 		return d.toLocaleDateString('en-US', {
 			month: 'short',
 			day: 'numeric',
 			year: 'numeric',
+			timeZone: zone,
 		});
 	};
 
@@ -62,6 +64,23 @@
 	const signalText = (item: any) => item.evidence ?? item.detail ?? item.explanation ?? '';
 
 	const hasSignals = (story: any) => strengthsOf(story).length > 0 || growthOf(story).length > 0;
+
+	// A story exists from its first sitting now (not just at save time), so the
+	// bank shows in-progress ones with a way back in. Everything a resume needs is
+	// the story id — it goes in the URL so a refresh resumes rather than restarts.
+	const inProgress = (story: any) => story.status === 'in_progress';
+	const titleOf = (story: any) => story.question || story.extracted_question || null;
+	const greenCount = (story: any) =>
+		SECTION_KEYS.filter(k => !!story.star_sections?.[k]).length;
+	const lastActive = (story: any, zone?: string) => {
+		const d = new Date(story.updated_at || story.created_at);
+		const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+		if (days === 0) return 'today';
+		if (days === 1) return 'yesterday';
+		if (days < 7) return `${days} days ago`;
+		return formatDate(d.toISOString(), zone);
+	};
+	const resume = (story: any) => goto(`/storybuilder?story=${story.id}`);
 </script>
 
 <div class="sb-page">
@@ -71,7 +90,7 @@
 	<div class="sb-inner">
 		<div class="sb-header">
 			<h1>My Story Bank</h1>
-			<p class="sb-subtitle">Review your polished narratives from previous coaching sessions.</p>
+			<p class="sb-subtitle">Your finished stories, and the ones still in the works.</p>
 		</div>
 
 		{#if stories.length === 0}
@@ -86,21 +105,55 @@
 				{#each stories as story}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
-					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-incomplete={story.tier === 'partial'} on:click={() => toggleExpand(story.id)}>
+					<div class="sb-story-card" class:sb-story-expanded={expandedId === story.id} class:sb-story-inprogress={inProgress(story)} class:sb-story-complete={!inProgress(story)} on:click={() => toggleExpand(story.id)}>
 						<div class="sb-story-top">
 							<div class="sb-story-info">
-								{#if story.tier === 'partial'}
-									<span class="sb-story-badge">Incomplete</span>
+								{#if inProgress(story)}
+									<span class="sb-story-badge sb-badge-progress">In progress · {greenCount(story)} of 4 sections solid</span>
+								{:else}
+									<span class="sb-story-badge sb-badge-complete">Completed</span>
 								{/if}
-								<h3 class:untitled={!story.question}>{story.question || 'Undefined interview question'}</h3>
+								{#if story.expired}
+									<span class="sb-story-badge sb-badge-ended">Resume window ended</span>
+								{/if}
+								<h3 class:untitled={!titleOf(story)}>{titleOf(story) || (inProgress(story) ? 'Untitled story — question not settled yet' : 'Undefined interview question')}</h3>
 							</div>
 							<div class="sb-story-meta">
-								<span class="sb-story-date">{formatDate(story.created_at)}</span>
+								{#if story.expired}
+									<span class="sb-story-date">ended {formatDate(story.expiresAt, $tz)}</span>
+									<button class="sb-continue-btn" on:click|stopPropagation={() => goto(`/credits?finish=${story.id}`)}>{inProgress(story) ? 'Finish' : 'Sharpen'} for $6</button>
+								{:else if inProgress(story)}
+									<span class="sb-story-date">last worked on {lastActive(story, $tz)}</span>
+									<button class="sb-continue-btn" on:click|stopPropagation={() => resume(story)}>Continue</button>
+								{:else}
+									<span class="sb-story-date">{formatDate(story.created_at, $tz)}</span>
+									<button class="sb-sharpen-btn" on:click|stopPropagation={() => resume(story)}>Sharpen</button>
+								{/if}
 								<span class="sb-story-toggle">{expandedId === story.id ? '▲' : '▼'}</span>
 							</div>
 						</div>
 
-						{#if expandedId === story.id}
+						{#if expandedId === story.id && inProgress(story)}
+							<div class="sb-story-body" on:click|stopPropagation>
+								{#if greenCount(story) > 0}
+									<div class="sb-section">
+										<h4>Solid so far</h4>
+										<div class="sb-tp-grid">
+											{#each SECTION_KEYS as sKey}
+												{#if story.star_sections?.[sKey]}
+													<div class="sb-tp-group">
+														<span class="sb-tp-label">{sKey.charAt(0).toUpperCase() + sKey.slice(1)}</span>
+														<p class="sb-story-text sb-story-text-sm">{story.star_sections[sKey]}</p>
+													</div>
+												{/if}
+											{/each}
+										</div>
+									</div>
+								{:else}
+									<p class="sb-signals-hint">Nothing solid yet — pick up where you left off and the sections will fill in as you go.</p>
+								{/if}
+							</div>
+						{:else if expandedId === story.id}
 							<div class="sb-story-body" on:click|stopPropagation>
 								{#if story.full_story}
 									<div class="sb-section">
@@ -300,10 +353,14 @@
 		}
 	}
 	/* Incomplete sessions are kept (the user paid for them) but shown distinctly. */
-	.sb-story-card.sb-story-incomplete {
-		background: #fdeceb;
-		border-color: #f0b8b2;
-		border-style: dashed;
+	/* Tile color follows STATUS only. The window is a badge + button, never a color. */
+	.sb-story-card.sb-story-inprogress {
+		background: #fff8e6;
+		border: 1px dashed #e6c46a;
+	}
+	.sb-story-card.sb-story-complete {
+		background: #f1f8ee;
+		border: 1px dashed #9ccc8a;
 	}
 	.sb-story-badge {
 		display: inline-block;
@@ -311,11 +368,49 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: #b0392c;
-		background: #fbd9d5;
+		color: #8a5a00;
+		background: #fdecc0;
 		border-radius: 10px;
 		padding: 2px 8px;
 		margin-bottom: 6px;
+		margin-right: 6px;
+	}
+	.sb-badge-ended {
+		color: #666;
+		background: #ececec;
+	}
+	.sb-badge-complete {
+		color: #2f6b1f;
+		background: #d9efd0;
+	}
+	.sb-badge-progress {
+		color: #8a5a00;
+		background: #fdecc0;
+	}
+	.sb-continue-btn, .sb-sharpen-btn {
+		border: none;
+		border-radius: 20px;
+		padding: 7px 16px;
+		font-size: 0.82rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 0.2s, transform 0.1s;
+		&:hover { transform: translateY(-1px); }
+	}
+	.sb-continue-btn {
+		background: #c96442;
+		color: white;
+		&:hover { background: #b5593a; }
+	}
+	.sb-sharpen-btn {
+		background: transparent;
+		color: #c96442;
+		border: 1px solid #c96442;
+		&:hover { background: #fbe7dc; }
+	}
+	.sb-story-text-sm {
+		font-size: 0.84rem;
+		line-height: 1.5;
 	}
 	.sb-story-info h3.untitled {
 		font-style: italic;
@@ -329,7 +424,7 @@
 	.sb-story-top {
 		display: flex;
 		justify-content: space-between;
-		align-items: flex-start;
+		align-items: center;
 		gap: 16px;
 	}
 	.sb-story-info {
@@ -350,10 +445,20 @@
 		margin: 4px 0 0;
 	}
 	.sb-story-meta {
-		display: flex;
+		display: grid;
+		grid-template-columns: auto auto auto;
+		grid-auto-flow: column;
 		align-items: center;
-		gap: 10px;
+		column-gap: 14px;
 		flex-shrink: 0;
+		white-space: nowrap;
+		/* A library stylesheet gives <button> its own display/margins, which pushed
+		   it ~12px below the date and chevron. Pin every child to the row's center. */
+		> * {
+			align-self: center;
+			margin: 0;
+			line-height: 1.2;
+		}
 	}
 	.sb-story-date {
 		font-size: 0.82rem;
@@ -526,6 +631,6 @@
 
 	@media (max-width: 600px) {
 		.sb-header h1 { font-size: 1.5rem; }
-		.sb-story-top { flex-direction: column; gap: 6px; }
+		.sb-story-top { flex-direction: column; align-items: flex-start; gap: 10px; }
 	}
 </style>

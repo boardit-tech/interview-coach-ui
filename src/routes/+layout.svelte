@@ -8,15 +8,14 @@
 	export let data;
 	// Reactive, not a one-time destructure: when a load re-runs (navigation or
 	// invalidate('app:credits')), these follow the fresh server data.
-	$: ({ loggedIn, credits, username, subscriptionID } = data);
-	$: subscriptionCancelAt = data.subscriptionCancelAt;
+	$: ({ loggedIn, credits, username } = data);
 	let isUserMenuOpen = false;
 
 	$: isStorybuilderPage = $page.url.pathname === '/storybuilder';
 	$: isDashboardPage = $page.url.pathname === '/dashboard';
 
 	// Server data is authoritative — re-sync the store whenever it changes.
-	$: userStore.set({ credits, subscriptionID, subscriptionCancelAt, loggedIn: loggedIn || false });
+	$: userStore.set({ credits, loggedIn: loggedIn || false });
 
 	let userMenuEl: HTMLElement;
 
@@ -66,9 +65,7 @@
 						<div class="nav-dropdown">
 							<div class="nav-dropdown-header">
 								<span class="nav-dropdown-name">{username}</span>
-								{#if !$userStore.subscriptionID && $userStore.credits > 0}
-									<span class="nav-dropdown-credits">{$userStore.credits} credit{$userStore.credits !== 1 ? 's' : ''} remaining</span>
-								{/if}
+								<a href="/credits" class="nav-dropdown-credits" on:click={() => isUserMenuOpen = false}>Your plan</a>
 							</div>
 							<div class="nav-dropdown-divider"></div>
 							<a href="/logout" data-sveltekit-reload on:click={() => isUserMenuOpen = false}>Log Out</a>

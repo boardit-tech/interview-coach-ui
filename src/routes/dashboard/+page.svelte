@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { userStore } from '$lib/stores/userStore';
 	import { goto } from '$app/navigation';
+	import { tz } from '$lib/stores/tz';
 
 	export let data;
 
@@ -8,15 +9,17 @@
 	$: recentStories = data.recentStories || [];
 	$: totalStories = data.totalStories || 0;
 	$: recentSessions = data.recentSessions || [];
+	$: plan = data.plan;
+	$: storiesLeft = plan?.storiesLeft ?? 0;
 
-	const formatDate = (dateStr: string) => {
+	const formatDate = (dateStr: string, zone?: string) => {
 		const d = new Date(dateStr);
-		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: zone });
 	};
 
-	const formatSessionDate = (dateStr: string) => {
+	const formatSessionDate = (dateStr: string, zone?: string) => {
 		const d = new Date(dateStr);
-		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+		return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: zone });
 	};
 
 	const getGreeting = () => {
@@ -84,7 +87,7 @@
 			<!-- CTA card -->
 			<div class="dash-card dash-cta-card">
 				<h2>Build a new story</h2>
-				<p>20 minutes with your AI coach to turn a real experience into a remarkable story that interviewers remember.</p>
+				<p>Turn a real experience into a story interviewers remember. Focused 20-minute sessions with your AI coach, as many as the story needs.</p>
 				<button class="dash-cta-btn" on:click={() => goto('/storybuilder')}>
 					Start Building
 				</button>
@@ -95,30 +98,20 @@
 				<h3>Achievements</h3>
 				<div class="dash-stats">
 					<div class="dash-stat">
-						<span class="dash-stat-value">{totalStories}</span>
-						<span class="dash-stat-label">{totalStories === 1 ? 'Story' : 'Stories'} Built</span>
+						<span class="dash-stat-value">{data.completedStories ?? 0}</span>
+						<span class="dash-stat-label">{(data.completedStories ?? 0) === 1 ? 'Story' : 'Stories'} Built</span>
 					</div>
 					<div class="dash-stat">
-						{#if $userStore.subscriptionID}
-							<span class="dash-stat-value">Unlimited credits</span>
-							<span class="dash-stat-label">Subscription Active</span>
-						{:else}
-							<span class="dash-stat-value">{$userStore.credits}</span>
-							<span class="dash-stat-label">Credit{$userStore.credits !== 1 ? 's' : ''} Left</span>
-						{/if}
+						<span class="dash-stat-value">{data.inProgressStories ?? 0}</span>
+						<span class="dash-stat-label">In Progress</span>
 					</div>
 				</div>
-				{#if $userStore.subscriptionID && $userStore.credits > 0}
-					<span class="dash-credits-note">Your subscription is used first. Your {$userStore.credits} purchased credit{$userStore.credits !== 1 ? 's' : ''} will kick in if it ends.</span>
+				{#if storiesLeft > 0 && storiesLeft <= 3}
+					<!-- Only at 3 or fewer — a ticking counter makes people ration. -->
+					<span class="dash-credits-note dash-left-note">{storiesLeft} {storiesLeft === 1 ? 'story' : 'stories'} left on your plan</span>
 				{/if}
 				<div class="dash-card-actions">
-					{#if $userStore.subscriptionID}
-						<a href="/credits" class="dash-action-link">Manage Subscription</a>
-					{:else}
-						<a href="/credits" class="dash-action-link">Buy More Credits</a>
-						<span class="dash-action-divider">·</span>
-						<a href="/credits" class="dash-action-link">Subscribe</a>
-					{/if}
+					<a href="/credits" class="dash-action-link">Your plan</a>
 					<span class="dash-action-divider">·</span>
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -127,7 +120,7 @@
 			</div>
 		</div>
 
-		<!-- Completed stories -->
+		<!-- Recent stories (in-progress ones link straight back into the session) -->
 		<div class="dash-section">
 			<div class="dash-section-header">
 				<h3>Recent Stories</h3>
@@ -140,14 +133,23 @@
 			{:else}
 				<div class="dash-stories-grid">
 					{#each recentStories as story}
-						<a href="/stories" class="dash-story-card" class:incomplete={story.tier === 'partial'}>
-							{#if story.tier === 'partial'}
-								<span class="dash-story-badge">Incomplete</span>
+						{@const inProgress = story.status === 'in_progress'}
+						{@const title = story.question || story.extracted_question}
+						{@const green = ['situation', 'task', 'action', 'result'].filter(k => !!story.star_sections?.[k]).length}
+						{@const expired = !!story.expired}
+						<a href={expired ? `/credits?finish=${story.id}` : inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:inprogress={inProgress} class:complete={!inProgress}>
+							{#if inProgress}
+								<span class="dash-story-badge dash-badge-progress">In progress · {green}/4</span>
+							{:else}
+								<span class="dash-story-badge dash-badge-complete">Completed</span>
 							{/if}
-							<span class="dash-story-title" class:untitled={!story.question}>
-								{story.question || 'Undefined interview question'}
+							{#if expired}
+								<span class="dash-story-badge dash-badge-ended">Resume window ended</span>
+							{/if}
+							<span class="dash-story-title" class:untitled={!title}>
+								{title || (inProgress ? 'Untitled story' : 'Undefined interview question')}
 							</span>
-							<span class="dash-story-date">{formatDate(story.created_at)}</span>
+							<span class="dash-story-date">{expired ? `${inProgress ? 'Finish' : 'Sharpen'} for $6 →` : inProgress ? 'Continue →' : formatDate(story.created_at, $tz)}</span>
 						</a>
 					{/each}
 				</div>
@@ -193,7 +195,7 @@
 							<option value="">Not sure / general</option>
 							{#each recentSessions as s}
 								<option value={s.session_id}>
-									{formatSessionDate(s.created_at)} — {s.status}
+									{formatSessionDate(s.created_at, $tz)} — {s.status}
 								</option>
 							{/each}
 						</select>
@@ -420,9 +422,21 @@
 	}
 	/* Incomplete sessions still live in the Story Bank — the user paid for them —
 	   but are visually distinct from finished, interview-ready stories. */
-	.dash-story-card.incomplete {
-		background: #fdeceb;
-		border: 1px dashed #f0b8b2;
+	/* Tile color follows STATUS only; the window is a badge + link text. */
+	.dash-story-card.inprogress {
+		background: #fff8e6;
+		border: 1px dashed #e6c46a;
+	}
+	.dash-story-card.complete {
+		background: #f1f8ee;
+		border: 1px dashed #9ccc8a;
+	}
+	.dash-badge-ended { color: #666 !important; background: #ececec !important; }
+	.dash-badge-complete { color: #2f6b1f !important; background: #d9efd0 !important; }
+	.dash-left-note { color: #8a5a00; background: #fff6e5; border-radius: 8px; padding: 6px 10px; display: inline-block; }
+	.dash-badge-progress {
+		color: #8a5a00 !important;
+		background: #fdecc0 !important;
 	}
 	.dash-story-badge {
 		align-self: flex-start;
@@ -430,8 +444,8 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: #b0392c;
-		background: #fbd9d5;
+		color: #8a5a00;
+		background: #fdecc0;
 		border-radius: 10px;
 		padding: 2px 8px;
 	}
