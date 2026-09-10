@@ -72,16 +72,33 @@ export async function decideNewStory(
   return { ok: false, reason };
 }
 
+// Window for a story that has no purchase attached (decided 2026-09-09):
+//   * legacy (migrated, carries the old session_id pointer): already past its
+//     window — free to read, $6 to reopen, complete or not. No special rules.
+//   * built on a legacy CREDIT (no session_id): 60 days from creation, same as
+//     a bundle story. Goes away with 5.5.
+const LEGACY_CREDIT_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
+export function windowWithoutPurchase(story: { session_id?: string | null; created_at?: string; updated_at?: string }): string {
+  if (story.session_id) return story.updated_at ?? story.created_at ?? new Date(0).toISOString();
+  return new Date(new Date(story.created_at ?? Date.now()).getTime() + LEGACY_CREDIT_WINDOW_MS).toISOString();
+}
+
 /**
  * A resume is free; the only question is whether the story's window is open.
- * Stories with no purchase_id (built under the credit bridge, or the 29 legacy
- * ones) are grandfathered: they were paid for under the old rules.
  */
 export async function decideResume(
   supabase: any,
-  story: { id: string; purchase_id: string | null }
+  story: { id: string; purchase_id: string | null; session_id?: string | null; created_at?: string; updated_at?: string }
 ): Promise<ResumeDecision> {
-  if (!story.purchase_id) return { ok: true, expiresAt: null, inGrace: false };
+  if (!story.purchase_id) {
+    const expiresAt = windowWithoutPurchase(story);
+    const expires = new Date(expiresAt).getTime();
+    const now = Date.now();
+    if (story.session_id || now >= expires + GRACE_MS) {
+      return { ok: false, reason: 'story_expired', expiredAt: expiresAt };
+    }
+    return { ok: true, expiresAt, inGrace: now >= expires };
+  }
 
   const { data: p } = await supabase
     .from('purchases')
@@ -152,14 +169,21 @@ export async function getPlanSummary(supabase: any, snap?: PurchaseSnapshot): Pr
 /** For a list of stories, which are past their window (and the grace hour). */
 export async function storyExpiries(
   supabase: any,
-  stories: Array<{ id: string; purchase_id: string | null; status: string }>,
+  stories: Array<{ id: string; purchase_id: string | null; status: string; session_id?: string | null; created_at?: string; updated_at?: string }>,
   snap?: PurchaseSnapshot
 ): Promise<Map<string, { expiresAt: string; expired: boolean }>> {
   const out = new Map<string, { expiresAt: string; expired: boolean }>();
+  const now = Date.now();
+  // Stories with no purchase: legacy = expired; credit-built = 60 days from creation.
+  for (const s of stories) {
+    if (s.purchase_id) continue;
+    const expiresAt = windowWithoutPurchase(s);
+    const expired = !!s.session_id || now >= new Date(expiresAt).getTime() + GRACE_MS;
+    out.set(s.id, { expiresAt, expired });
+  }
   if (!stories.some(s => s.purchase_id)) return out;
   const { purchases } = snap ?? await loadPurchases(supabase);
   const byId = new Map<string, any>(purchases.map((p: any) => [p.id, p]));
-  const now = Date.now();
   for (const s of stories) {
     const p = s.purchase_id ? byId.get(s.purchase_id) : null;
     if (!p) continue;

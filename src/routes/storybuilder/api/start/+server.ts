@@ -38,7 +38,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
     // Ownership is enforced by RLS: a story that isn't ours reads as "not found".
     const { data: story, error: storyErr } = await locals.supabase
       .from('stories')
-      .select('id, status, star_sections, star_status, extracted_question, purchase_id')
+      .select('id, status, star_sections, star_status, extracted_question, purchase_id, session_id, created_at, updated_at')
       .eq('id', body.storyId)
       .single();
     if (storyErr || !story) {

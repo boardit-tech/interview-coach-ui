@@ -12,7 +12,7 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
     const [{ data: stories, error }, snap] = await Promise.all([
         locals.supabase
             .from('stories')
-            .select('id, question, full_story, talking_points, strength_signals, flags, created_at, tier, status, extracted_question, star_sections, star_status, updated_at, purchase_id')
+            .select('id, question, full_story, talking_points, strength_signals, flags, created_at, tier, status, extracted_question, star_sections, star_status, updated_at, purchase_id, session_id')
             .eq('user_id', session.user.id)
             .order('updated_at', { ascending: false }),
         loadPurchases(locals.supabase),

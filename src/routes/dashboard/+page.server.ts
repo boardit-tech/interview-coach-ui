@@ -25,7 +25,7 @@ export const load: PageServerLoad = async ({ locals, parent, depends }) => {
     ] = await Promise.all([
         locals.supabase
             .from('stories')
-            .select('id, question, created_at, tier, status, extracted_question, star_sections, updated_at, purchase_id')
+            .select('id, question, created_at, tier, status, extracted_question, star_sections, updated_at, purchase_id, session_id')
             .eq('user_id', userId)
             .order('updated_at', { ascending: false })
             .limit(3),

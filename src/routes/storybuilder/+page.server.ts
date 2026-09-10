@@ -17,7 +17,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     storyId
       ? locals.supabase
           .from('stories')
-          .select('id, status, question, extracted_question, star_sections, updated_at, purchase_id')
+          .select('id, status, question, extracted_question, star_sections, created_at, updated_at, purchase_id, session_id')
           .eq('id', storyId)
           .single()
       : Promise.resolve({ data: null }),
