@@ -109,8 +109,6 @@
 				{#if storiesLeft > 0 && storiesLeft <= 3}
 					<!-- Only at 3 or fewer — a ticking counter makes people ration. -->
 					<span class="dash-credits-note dash-left-note">{storiesLeft} {storiesLeft === 1 ? 'story' : 'stories'} left on your plan</span>
-				{:else if $userStore.credits > 0 && storiesLeft === 0}
-					<span class="dash-credits-note">{$userStore.credits} session credit{$userStore.credits !== 1 ? 's' : ''} — each one starts a story.</span>
 				{/if}
 				<div class="dash-card-actions">
 					<a href="/credits" class="dash-action-link">Your plan</a>

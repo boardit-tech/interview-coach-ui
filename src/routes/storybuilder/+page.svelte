@@ -30,12 +30,11 @@
 	export let data: {
 		resumeStory: { id: string; status: 'in_progress' | 'complete'; question: string | null; green: number; updatedAt: string; expiresAt: string | null; expired: boolean } | null;
 		plan: { storiesLeft: number; poolExpiresAt: string | null; hasAnyPurchase: boolean; allExpired: boolean } | null;
-		credits: number;
 	};
 	// Why a NEW story can't start, if it can't. Pre-computed from the plan on load
 	// and refreshed from the server's answer on a refused start.
 	let blockedReason: 'no_stories' | 'window_ended' | 'no_purchase' | null = null;
-	$: if (data?.plan && data.plan.storiesLeft === 0 && (data.credits ?? 0) === 0) {
+	$: if (data?.plan && data.plan.storiesLeft === 0) {
 		blockedReason = data.plan.allExpired ? 'window_ended' : data.plan.hasAnyPurchase ? 'no_stories' : 'no_purchase';
 	}
 	const fmtDay = (iso: string, zone?: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: zone });
@@ -844,20 +843,16 @@
 					if (resumeStory) resumeStory = { ...resumeStory, expired: true };
 				} else if (errCode === 'no_stories' || errCode === 'window_ended' || errCode === 'no_purchase') {
 					blockedReason = errCode;
-				} else if (interviewRes.status === 402 || errCode === 'no_credits') {
+				} else if (interviewRes.status === 402) {
 					blockedReason = 'no_purchase';
 				} else {
-					showToast('Something went wrong starting your session — no credit was used. Please try again.', 'error', 8000);
+					showToast('Something went wrong starting your session. Please try again.', 'error', 8000);
 				}
 				loading = false;
 				return;
 			}
 
 			const data = await interviewRes.json();
-			// Server returns the new balance (null for subscribers).
-			if (data.credits !== undefined && data.credits !== null) {
-				$userStore = { ...$userStore, credits: data.credits };
-			}
 			sessionId = data.sessionId;
 			storyId = data.storyId ?? null;
 			storyStatus = data.storyStatus ?? 'in_progress';
@@ -912,8 +907,8 @@
 			ttsSpeak(cleanOpening);
 		} catch {
 			// Network error before we received a response — the server may or may not
-			// have started (and charged). Don't falsely claim "no credit used".
-			showToast('Something went wrong starting your session. Please refresh and check your credits before retrying.', 'error', 8000);
+			// have started.
+			showToast('Something went wrong starting your session. Please refresh and try again.', 'error', 8000);
 		}
 		loading = false;
 	}
@@ -1343,8 +1338,6 @@
 				{/if}
 				{#if data?.plan && data.plan.storiesLeft > 0 && data.plan.storiesLeft <= 3}
 					<p class="sb-lobby-left">{data.plan.storiesLeft} {data.plan.storiesLeft === 1 ? 'story' : 'stories'} left on your plan</p>
-				{:else if data?.plan?.storiesLeft === 0 && (data?.credits ?? 0) > 0}
-					<p class="sb-lobby-left">One credit starts this story.</p>
 				{/if}
 				<button class="sb-start-btn" on:click={() => handleStart()} disabled={loading}>
 					{loading ? 'Starting...' : 'Start Building'}

@@ -78,17 +78,15 @@ export const load: PageServerLoad = async ({ locals, url }) => {
         id: string; kind: Kind; source: string; storiesAllowed: number; used: number;
         expiresAt: string; expired: boolean; revoked: boolean; forStory: string | null; note: string | null;
     }> = [];
-    let credits = 0;
     let finishStory: { id: string; question: string | null } | null = null;
 
     if (session) {
-        const [{ data: purchases }, { data: consumptions }, { data: profile }] = await Promise.all([
+        const [{ data: purchases }, { data: consumptions }] = await Promise.all([
             locals.supabase
                 .from('purchases')
                 .select('id, kind, source, stories_allowed, expires_at, revoked_at, for_story_id, note')
                 .order('expires_at', { ascending: true }),
             locals.supabase.from('story_consumptions').select('purchase_id'),
-            locals.supabase.from('profiles').select('credits').eq('id', session.user.id).single(),
         ]);
         const used = new Map<string, number>();
         for (const c of consumptions ?? []) used.set(c.purchase_id, (used.get(c.purchase_id) ?? 0) + 1);
@@ -105,7 +103,6 @@ export const load: PageServerLoad = async ({ locals, url }) => {
             forStory: p.for_story_id,
             note: p.note,
         }));
-        credits = profile?.credits ?? 0;
 
         if (finishStoryId) {
             const { data: s } = await locals.supabase
@@ -122,7 +119,6 @@ export const load: PageServerLoad = async ({ locals, url }) => {
         finishOffering: OFFERINGS.finish_story,
         finishStory,
         plan,
-        credits,
     };
 };
 

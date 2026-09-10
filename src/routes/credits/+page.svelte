@@ -8,7 +8,6 @@
 	$: plan = data.plan ?? [];
 	$: active = plan.filter(p => !p.expired && !p.revoked);
 	$: past = plan.filter(p => p.expired || p.revoked);
-	$: credits = data.credits ?? 0;
 
 	const submit = (id: string) => {
 		const form = document.getElementById(id);
@@ -69,14 +68,14 @@
 
 			<div class="credits-header">
 				<h1>Your plan</h1>
-				{#if active.length === 0 && credits === 0}
+				{#if active.length === 0}
 					<p class="credits-subtitle">No stories on your plan right now. Pick one below to start building.</p>
 				{:else}
 					<p class="credits-subtitle">Everything you can build with, and when each window ends.</p>
 				{/if}
 			</div>
 
-			{#if active.length > 0 || credits > 0}
+			{#if active.length > 0}
 				<div class="credits-plan">
 					{#each active as p}
 						<div class="credits-plan-row">
@@ -87,15 +86,6 @@
 							<span class="credits-plan-ends">ends {fmtDate(p.expiresAt, $tz)}</span>
 						</div>
 					{/each}
-					{#if credits > 0}
-						<div class="credits-plan-row">
-							<div>
-								<span class="credits-plan-kind">Session credits</span>
-								<span class="credits-plan-usage">{credits} left · one credit starts one story</span>
-							</div>
-							<span class="credits-plan-ends">no expiry</span>
-						</div>
-					{/if}
 				</div>
 			{/if}
 

@@ -7,17 +7,16 @@ import { getPlanSummary, storyExpiries, loadPurchases } from '$lib/server/entitl
 // read to the user's own rows.
 export const load: PageServerLoad = async ({ locals, url }) => {
   const session = await locals.getSession();
-  if (!session) return { resumeStory: null, plan: null, credits: 0 };
+  if (!session) return { resumeStory: null, plan: null };
 
   const storyId = url.searchParams.get('story');
 
-  const [snap, { data: profile }, storyRes] = await Promise.all([
+  const [snap, storyRes] = await Promise.all([
     loadPurchases(locals.supabase),
-    locals.supabase.from('profiles').select('credits').eq('id', session.user.id).single(),
     storyId
       ? locals.supabase
           .from('stories')
-          .select('id, status, question, extracted_question, star_sections, created_at, updated_at, purchase_id, session_id')
+          .select('id, status, question, extracted_question, star_sections, created_at, updated_at, purchase_id')
           .eq('id', storyId)
           .single()
       : Promise.resolve({ data: null }),
@@ -39,5 +38,5 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     };
   }
 
-  return { resumeStory, plan, credits: profile?.credits ?? 0 };
+  return { resumeStory, plan };
 };
