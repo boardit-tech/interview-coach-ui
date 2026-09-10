@@ -110,9 +110,11 @@
 							<div class="sb-story-info">
 								{#if inProgress(story)}
 									<span class="sb-story-badge sb-badge-progress">In progress · {greenCount(story)} of 4 sections solid</span>
+								{:else}
+									<span class="sb-story-badge sb-badge-complete">Completed</span>
 								{/if}
 								{#if story.expired}
-									<span class="sb-story-badge sb-badge-ended">Window ended</span>
+									<span class="sb-story-badge sb-badge-ended">Resume window ended</span>
 								{/if}
 								<h3 class:untitled={!titleOf(story)}>{titleOf(story) || (inProgress(story) ? 'Untitled story — question not settled yet' : 'Undefined interview question')}</h3>
 							</div>
@@ -376,6 +378,10 @@
 	.sb-badge-ended {
 		color: #666;
 		background: #ececec;
+	}
+	.sb-badge-complete {
+		color: #2f6b1f;
+		background: #d9efd0;
 	}
 	.sb-badge-progress {
 		color: #8a5a00;

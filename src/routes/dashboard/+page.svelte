@@ -140,9 +140,11 @@
 						<a href={expired ? `/credits?finish=${story.id}` : inProgress ? `/storybuilder?story=${story.id}` : '/stories'} class="dash-story-card" class:inprogress={inProgress} class:complete={!inProgress}>
 							{#if inProgress}
 								<span class="dash-story-badge dash-badge-progress">In progress · {green}/4</span>
+							{:else}
+								<span class="dash-story-badge dash-badge-complete">Completed</span>
 							{/if}
 							{#if expired}
-								<span class="dash-story-badge dash-badge-ended">Window ended</span>
+								<span class="dash-story-badge dash-badge-ended">Resume window ended</span>
 							{/if}
 							<span class="dash-story-title" class:untitled={!title}>
 								{title || (inProgress ? 'Untitled story' : 'Undefined interview question')}
@@ -430,6 +432,7 @@
 		border: 1px dashed #9ccc8a;
 	}
 	.dash-badge-ended { color: #666 !important; background: #ececec !important; }
+	.dash-badge-complete { color: #2f6b1f !important; background: #d9efd0 !important; }
 	.dash-left-note { color: #8a5a00; background: #fff6e5; border-radius: 8px; padding: 6px 10px; display: inline-block; }
 	.dash-badge-progress {
 		color: #8a5a00 !important;
